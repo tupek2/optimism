@@ -85,7 +85,17 @@ def activate_nodes(mesh, nodesToColors, nodesToBoundary, active_nodes):
             active_nodes[n] = 1.0
 
 
+def create_unique_poly_nodes(conns, polyElems):
+    polyNodes = {}
+    for p in polyElems:
+        for elem in polyElems[p]:
+          for node in conns[elem]:
+            set_value_insert(polyNodes, p, int(node))
+    return polyNodes
+
+
 def divide_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly):
+    # only construct faces when color of other poly is greater than this poly's color
     polyFaces = {}
     polyInterior = []
     for n in nodesOfPoly:
@@ -104,6 +114,7 @@ def divide_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, node
 
         if not onBoundary:
           polyInterior.append(n)
+
     return polyFaces,polyInterior
 
 class PatchTestQuadraticElements(MeshFixture.MeshFixture):
@@ -135,7 +146,7 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
 
     def test_this(self):
         polyElems = create_poly_elems(self.partition)
-        polyNodes = self.create_poly_nodes(polyElems)
+        polyNodes = create_unique_poly_nodes(self.mesh.conns, polyElems)
 
         nodesToBoundary = create_nodes_to_boundaries(self.mesh, ['bottom','top','right','left'])
         nodesToColors = create_nodes_to_colors(self.mesh.conns, self.partition)
@@ -153,13 +164,7 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
         print('wrote output')
 
 
-    def create_poly_nodes(self, polyElems):
-        polyNodes = {}
-        for p in polyElems:
-            for elem in polyElems[p]:
-              for node in self.mesh.conns[elem]:
-                set_value_insert(polyNodes, p, int(node))
-        return polyNodes
+
 
     
 
