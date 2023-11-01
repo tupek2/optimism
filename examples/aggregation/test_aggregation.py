@@ -174,12 +174,13 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
                     else: inactive.append(fn)
 
                 # tolerancing for some geometric checks to ensure linear reproducable interpolations
-                tol = 1e-6  # MRT, this should eventually be relative to mesh size
+                basetol = 1e-6
 
                 assert(len(active)>1) # MRT, need to handle cases where there aren't even two eventually
 
                 edge1 = self.mesh.coords[active[1]] - self.mesh.coords[active[0]]
                 edge1dotedge1 = onp.dot(edge1, edge1)
+                tol = basetol * onp.sqrt(edge1dotedge1)
 
                 # check if active nodes already span a triangle, then no need to activate any more
                 activeFormTriangle = False
@@ -188,8 +189,7 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
                     edge2 = self.mesh.coords[activeNode] - self.mesh.coords[active[0]]
                     edge2dotedge2 = onp.dot(edge2, edge2)
                     edge1dotedge2 = onp.dot(edge1, edge2)
-                    # eventually be safe if two nodes overlap, maybe prevent this further up
-                    if (edge1dotedge2*edge1dotedge2 / edge1dotedge1*edge2dotedge2) < 1.0-tol:
+                    if edge1dotedge2*edge1dotedge2 < (1.0-tol) * edge1dotedge1*edge2dotedge2:
                         activeFormTriangle = True
                         break
 
@@ -222,10 +222,6 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
         self.write_output()
         print('wrote output')
 
-
-
-
-    
 
 if __name__ == '__main__':
     import unittest
