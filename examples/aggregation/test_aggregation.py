@@ -5,6 +5,9 @@ from optimism import Mesh
 from optimism.test import MeshFixture
 import metis
 
+def cross_2d(a, b):
+    return a[0]*b[1] - b[0]*a[1]
+
 
 def set_value_insert(themap, key, value):
     key = int(key)
@@ -117,6 +120,7 @@ def divide_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, node
 
     return polyFaces,polyInterior
 
+
 class PatchTestQuadraticElements(MeshFixture.MeshFixture):
     
     def setUp(self):
@@ -144,7 +148,7 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
         writer.write()
 
 
-    def test_this(self):
+    def test_aggregation_and_interpolation(self):
         polyElems = create_poly_elems(self.partition)
         polyNodes = create_unique_poly_nodes(self.mesh.conns, polyElems)
 
@@ -152,12 +156,67 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
         nodesToColors = create_nodes_to_colors(self.mesh.conns, self.partition)
         activate_nodes(self.mesh, nodesToColors, nodesToBoundary, self.active_nodes)
 
+        interpolation = [() for n in range(len(self.active_nodes))]
+        for n in range(len(self.active_nodes)):
+            if self.active_nodes[n]:
+                interpolation[n] = ([n], [1.0]) # neighbors and weights
+        
         for p in polyNodes:
             nodesOfPoly = polyNodes[p]
             polyFaces, polyInterior = divide_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly)
 
-            print('poly face = ', polyFaces)
-            print('poly interior = ', polyInterior)
+            for f in polyFaces:
+                active = []
+                inactive = []
+                faceNodes = polyFaces[f]
+                for fn in faceNodes:
+                    if self.active_nodes[fn]: active.append(fn)
+                    else: inactive.append(fn)
+
+                # tolerancing for some geometric checks to ensure linear reproducable interpolations
+                tol = 1e-6  # MRT, this should eventually be relative to mesh size
+
+                assert(len(active)>1) # MRT, need to handle cases where there aren't even two eventually
+
+                edge1 = self.mesh.coords[active[1]] - self.mesh.coords[active[0]]
+                edge1dotedge1 = onp.dot(edge1, edge1)
+
+                # check if active nodes already span a triangle, then no need to activate any more
+                activeFormTriangle = False
+                for i in range(2,len(active)):
+                    activeNode = active[i]
+                    edge2 = self.mesh.coords[activeNode] - self.mesh.coords[active[0]]
+                    edge2dotedge2 = onp.dot(edge2, edge2)
+                    edge1dotedge2 = onp.dot(edge1, edge2)
+                    # eventually be safe if two nodes overlap, maybe prevent this further up
+                    if (edge1dotedge2*edge1dotedge2 / edge1dotedge1*edge2dotedge2) < 1.0-tol:
+                        activeFormTriangle = True
+                        break
+
+                allColinear = False
+                if not activeFormTriangle: # check if everything is co-linear, then no need to add active either
+                    allColinear = True
+                    for inactiveNode in inactive:
+                        edge2 = self.mesh.coords[inactiveNode] - self.mesh.coords[active[0]]
+                        edge2dotedge2 = onp.dot(edge2, edge2)
+                        edge1dotedge2 = onp.dot(edge1, edge2)
+                        if edge1dotedge2*edge1dotedge2 < (1.0-tol) * edge1dotedge1*edge2dotedge2:
+                            allColinear = False
+                            break
+                
+                if (not activeFormTriangle and not allColinear):
+                    maxOfflineDistanceIndex = 0
+                    maxDistance = 0.0
+                    for i,inactiveNode in enumerate(inactive):
+                        edge2 = self.mesh.coords[inactiveNode] - self.mesh.coords[active[0]]
+
+                        distMeasure = abs(cross_2d(edge1, edge2))
+                        if distMeasure > maxDistance:
+                            maxDistance = distMeasure
+                            maxOfflineDistanceIndex = i
+
+                    activateInactive = inactive[maxOfflineDistanceIndex]
+                    self.active_nodes[activateInactive] = 1.0
 
 
         self.write_output()
