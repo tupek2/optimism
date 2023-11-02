@@ -74,7 +74,7 @@ def activate_nodes(mesh, nodesToColors, nodesToBoundary, active_nodes):
             active_nodes[n] = 1.0
 
 
-def create_unique_poly_nodes(conns, polyElems):
+def extract_poly_nodes(conns, polyElems):
     polyNodes = {}
     for p in polyElems:
         for elem in polyElems[p]:
@@ -87,6 +87,7 @@ def divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p,
     # only construct faces when color of other poly is greater than this poly's color
     polyFaces = {}
     polyInterior = []
+    polyExterior = []
     for n in nodesOfPoly:
         onBoundary = False
         if n in nodesToBoundary:
@@ -101,7 +102,78 @@ def divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p,
                 if c > p:
                   set_value_insert(polyFaces, int(c), n)
 
-        if not onBoundary:
+        if onBoundary:
+          polyExterior.append(n)
+        else:
           polyInterior.append(n)
 
-    return polyFaces,polyInterior
+    return polyFaces, onp.array(polyExterior), onp.array(polyInterior)
+
+
+def cross_2d(a, b):
+    return a[0]*b[1] - b[0]*a[1]
+
+
+def determine_active_and_inactive_face_nodes(faceNodes, coords, active_nodes):
+    active = []
+    inactive = []
+    for fn in faceNodes:
+        if active_nodes[fn]: active.append(fn)
+        else: inactive.append(fn)
+
+            # tolerancing for some geometric checks to ensure linear reproducable interpolations
+    basetol = 1e-6
+
+    if len(active)==1:
+      assert(len(inactive)==0) # just a single node on the boundary
+      return active, inactive, 0.0
+
+    assert(len(active) > 1) # MRT, need to handle cases where there aren't even two eventually
+
+    edge1 = coords[active[1]] - coords[active[0]]
+    edge1dotedge1 = onp.dot(edge1, edge1)
+    lengthScale = onp.sqrt(edge1dotedge1)
+    tol = basetol * lengthScale
+
+            # check if active nodes already span a triangle, then no need to activate any more
+    activeFormTriangle = False
+    for i in range(2,len(active)):
+        activeNode = active[i]
+        edge2 = coords[activeNode] - coords[active[0]]
+        edge2dotedge2 = onp.dot(edge2, edge2)
+        edge1dotedge2 = onp.dot(edge1, edge2)
+        if edge1dotedge2*edge1dotedge2 < (1.0-tol) * edge1dotedge1*edge2dotedge2:
+            activeFormTriangle = True
+            break
+
+    allColinear = False
+    if not activeFormTriangle: # check if everything is co-linear, then no need to add active either
+        allColinear = True
+        for inactiveNode in inactive:
+            edge2 = coords[inactiveNode] - coords[active[0]]
+            edge2dotedge2 = onp.dot(edge2, edge2)
+            edge1dotedge2 = onp.dot(edge1, edge2)
+            if edge1dotedge2*edge1dotedge2 < (1.0-tol) * edge1dotedge1*edge2dotedge2:
+                allColinear = False
+                break
+            
+    if (not activeFormTriangle and not allColinear):
+        maxOfflineDistanceIndex = 0
+        maxDistance = 0.0
+        for i,inactiveNode in enumerate(inactive):
+            edge2 = coords[inactiveNode] - coords[active[0]]
+
+            distMeasure = abs(cross_2d(edge1, edge2))
+            if distMeasure > maxDistance:
+                maxDistance = distMeasure
+                maxOfflineDistanceIndex = i
+
+        activateInactive = inactive[maxOfflineDistanceIndex]
+        active_nodes[activateInactive] = 1.0
+
+        active.append(activateInactive)
+        szBefore = len(inactive)
+        del inactive[maxOfflineDistanceIndex]
+        assert(szBefore == len(inactive)+1)
+
+    return active, inactive, lengthScale
