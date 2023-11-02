@@ -138,5 +138,5 @@ class MeshFixture(TestFixture):
         coords = vmap(map_to_cos, (0,None,None))(coords, L, warp)
         blocks = {'block': np.arange(conns.shape[0])}
         U = np.zeros(coords.shape)
-        return construct_mesh_from_basic_data(coords, conns, None, nodeSets, sideSets), U
+        return construct_mesh_from_basic_data(coords, conns, blocks, nodeSets, sideSets), U
     

@@ -1,5 +1,7 @@
 import numpy as onp
 import metis
+import jax
+import jax.numpy as np
 from optimism import Mesh
 
 def set_value_insert(themap, key, value):
@@ -54,24 +56,24 @@ def create_partitions(conns, numParts):
     return onp.array(parts, dtype=int)
 
 
-def activate_nodes(mesh, nodesToColors, nodesToBoundary, active_nodes):
-    for n in range(len(active_nodes)):
+def activate_nodes(nodesToColors, nodesToBoundary, activeNodes):
+    for n in range(len(activeNodes)):
         boundaryCount = 0
         if n in nodesToBoundary:
             boundaryCount += len(nodesToBoundary[n])
             if boundaryCount>1:
-                active_nodes[n] = 1.0
+                activeNodes[n] = 1.0
                 continue
 
         colorCount = 0
         if n in nodesToColors:
             colorCount += len(nodesToColors[n])
             if colorCount > 2:
-                active_nodes[n] = 1.0
+                activeNodes[n] = 1.0
                 continue
             
         if (boundaryCount > 0 and colorCount > 1):
-            active_nodes[n] = 1.0
+            activeNodes[n] = 1.0
 
 
 def extract_poly_nodes(conns, polyElems):
@@ -114,11 +116,11 @@ def cross_2d(a, b):
     return a[0]*b[1] - b[0]*a[1]
 
 
-def determine_active_and_inactive_face_nodes(faceNodes, coords, active_nodes):
+def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes):
     active = []
     inactive = []
     for fn in faceNodes:
-        if active_nodes[fn]: active.append(fn)
+        if activeNodes[fn]: active.append(fn)
         else: inactive.append(fn)
 
             # tolerancing for some geometric checks to ensure linear reproducable interpolations
@@ -135,7 +137,7 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, active_nodes):
     lengthScale = onp.sqrt(edge1dotedge1)
     tol = basetol * lengthScale
 
-            # check if active nodes already span a triangle, then no need to activate any more
+    # check if active nodes already span a triangle, then no need to activate any more
     activeFormTriangle = False
     for i in range(2,len(active)):
         activeNode = active[i]
@@ -169,7 +171,7 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, active_nodes):
                 maxOfflineDistanceIndex = i
 
         activateInactive = inactive[maxOfflineDistanceIndex]
-        active_nodes[activateInactive] = 1.0
+        activeNodes[activateInactive] = 1.0
 
         active.append(activateInactive)
         szBefore = len(inactive)
@@ -177,3 +179,63 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, active_nodes):
         assert(szBefore == len(inactive)+1)
 
     return active, inactive, lengthScale
+
+
+@jax.jit
+def rkpm(neighbors, coords, evalCoord, length):
+    dim = 2
+    # setup moment matrix in 2D
+    def comp_h(I):
+        return np.array([1.0, (evalCoord[0]-coords[I,0])/length, (evalCoord[1]-coords[I,1])/length])
+
+    def comp_m(I):
+        H = comp_h(I)
+        return np.outer(H,H)
+
+    def comp_weight(I, b):
+        return comp_h(I)@b
+
+    M = np.sum( jax.vmap(comp_m)(neighbors), axis=0 )
+    M += 1e-11 * np.eye(dim+1)
+
+    H0 = np.array([1.0,0.0,0.0])
+    b = np.linalg.solve(M, H0)
+    b += np.linalg.solve(M, H0 - M@b)
+
+    return jax.vmap(comp_weight, (0,None))(neighbors, b)
+
+
+def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords):
+    
+    activeNodes = onp.zeros_like(coords)[:,0]
+    activate_nodes(nodesToColors, nodesToBoundary, activeNodes)
+
+    interpolation = [() for n in range(len(activeNodes))]
+        
+    for p in polyNodes:
+        nodesOfPoly = polyNodes[p]
+        polyFaces, polyExterior, polyInterior = divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly)
+
+        maxLength = 0
+        for f in polyFaces:
+            # warning, this next function modifies activeNodes
+            active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes)
+            maxLength = onp.maximum(maxLength, lengthScale)
+
+            for iNode in inactive:
+                weights = rkpm(np.array(active), coords, coords[iNode], lengthScale)
+                interpolation[iNode] = (active, weights)
+
+        isActive = [int(v) for v in activeNodes[polyExterior]]
+        polyActiveExterior = polyExterior[isActive]
+
+        for iNode in polyInterior:
+            weights = rkpm(np.array(polyActiveExterior), coords, coords[iNode], maxLength)
+            interpolation[iNode] = (active, weights)
+
+    # all active nodes are their own neighbors with weight 1.  do this now that all actives are established
+    for n in range(len(activeNodes)):
+        if activeNodes[n]:
+            interpolation[n] = ([n], [1.0]) # neighbors and weights
+
+    return interpolation, activeNodes
