@@ -233,7 +233,7 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
             weights = rkpm(np.array(polyActiveExterior), coords, coords[iNode], maxLength)
             interpolation[iNode] = (active, weights)
 
-    # all active nodes are their own neighbors with weight 1.  do this now that all actives are established
+    # all active nodes are their own neighbors with weight 1.  do this now that all actives/inactives are established
     for n in range(len(activeNodes)):
         if activeNodes[n]:
             interpolation[n] = ([n], [1.0]) # neighbors and weights

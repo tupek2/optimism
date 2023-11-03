@@ -62,7 +62,6 @@ def settings_with_new_tol(oldSettings, newTol):
                            use_incremental_objective=oldSettings.use_incremental_objective,
                            debug_info=oldSettings.debug_info,
                            over_iters=oldSettings.over_iters)
-                           
 
     return newSettings
 
