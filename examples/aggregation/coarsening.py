@@ -12,13 +12,6 @@ def set_value_insert(themap, key, value):
         themap[key] = set([value])
 
 
-def create_poly_elems(partitionField):
-    polys = {}
-    for e,p in enumerate(partitionField):
-        set_value_insert(polys, p, int(e))
-    return polys
-
-
 def create_graph(conns):
     elemToElem = [ [] for _ in range(len(conns)) ]
     _, edges = Mesh.create_edges(conns)
@@ -30,7 +23,6 @@ def create_graph(conns):
             elemToElem[t1].append(t0)
 
     return elemToElem
-
 
 
 def create_nodes_to_colors(conns, partitions):
@@ -76,12 +68,19 @@ def activate_nodes(nodesToColors, nodesToBoundary, activeNodes):
             activeNodes[n] = 1.0
 
 
+def create_poly_elems(partitionField):
+    polys = {}
+    for e,p in enumerate(partitionField):
+        set_value_insert(polys, p, int(e))
+    return polys
+
+
 def extract_poly_nodes(conns, polyElems):
     polyNodes = {}
     for p in polyElems:
         for elem in polyElems[p]:
-          for node in conns[elem]:
-            set_value_insert(polyNodes, p, int(node))
+            for node in conns[elem]:
+                set_value_insert(polyNodes, p, int(node))
     return polyNodes
 
 
@@ -105,9 +104,9 @@ def divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p,
                   set_value_insert(polyFaces, int(c), n)
 
         if onBoundary:
-          polyExterior.append(n)
+            polyExterior.append(n)
         else:
-          polyInterior.append(n)
+            polyInterior.append(n)
 
     return polyFaces, onp.array(polyExterior), onp.array(polyInterior)
 
@@ -123,7 +122,7 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes):
         if activeNodes[fn]: active.append(fn)
         else: inactive.append(fn)
 
-            # tolerancing for some geometric checks to ensure linear reproducable interpolations
+    # tolerancing for some geometric checks to ensure linear reproducable interpolations
     basetol = 1e-6
 
     if len(active)==1:

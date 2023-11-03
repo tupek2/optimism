@@ -1,4 +1,4 @@
-
+from collections import namedtuple
 import numpy as onp
 from optimism.test import MeshFixture
 import coarsening
@@ -24,16 +24,18 @@ def write_output(mesh, partitions, nodalFields):
 
 
 
-def construct_basis_on_poly(polyElems, polyNodes, conns, fs):
-    #uniqueNodes = conns[polyElems[0]]
-    #for e in polyElems[1:]:
-    #    uniqueNodes = insort(uniqueNodes, conns[e])
+def construct_basis_on_poly(polyElems, polyNodes, activeNodalField_interp, activeNodalField_quadrature, conns, fs):
 
-    # these are not set to be general yet, assuming the pou integration is over all nodes, all nodes are active
-    Q = len(polyNodes) # number of quadrature bases
-    Nnode = len(polyNodes) # number of active nodes on poly
+    countInterpolationNodes = 0
+    countQuadratureNodes = 0
+    for n in polyNodes:
+        if activeNodalField_interp[n]: countInterpolationNodes+=1
+        if activeNodalField_quadrature[n]: countQuadratureNodes+=1
 
-    globalNodeToLocalNode = {nodeN : n for n, nodeN in enumerate(polyNodes)}
+    Q = countQuadratureNodes # number of quadrature bases
+    Nnode = countInterpolationNodes # number of active nodes on poly
+
+    globalNodeToLocalNode = {node : n for n,node in enumerate(polyNodes)}
 
     G = onp.zeros((Q,Q))
     for e in polyElems:
@@ -73,17 +75,6 @@ def construct_basis_on_poly(polyElems, polyNodes, conns, fs):
     for n in range(Nnode):
         for d in range(dim):
             B[:,n,d] = Ginv@B[:,n,d]
-
-    # attemps to diagonalize the Graham matrix
-    #G1 = onp.average(G, axis=1)
-    #GinvG1 = Ginv @ G1
-
-    #V = onp.outer( onp.ones(Nnode), GinvG1 )
-    #Gtilde = V @ G @ V.T
-
-    #print('Gtilesum = ', onp.sum(onp.sum(Gtilde,axis=0),axis=0))
-    #print('Gsum = ', onp.sum(onp.sum(G,axis=0),axis=0))
-    #print('Gtilde = ', Gtilde)
 
     return B, onp.sum(G, axis=1), globalNodeToLocalNode
 
