@@ -115,7 +115,7 @@ def cross_2d(a, b):
     return a[0]*b[1] - b[0]*a[1]
 
 
-def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes):
+def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes, requireLinearComplete):
     active = []
     inactive = []
     for fn in faceNodes:
@@ -136,6 +136,9 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes):
     lengthScale = onp.sqrt(edge1dotedge1)
     tol = basetol * lengthScale
 
+    if not requireLinearComplete:
+      return active, inactive, lengthScale
+    
     # check if active nodes already span a triangle, then no need to activate any more
     activeFormTriangle = False
     for i in range(2,len(active)):
@@ -205,10 +208,14 @@ def rkpm(neighbors, coords, evalCoord, length):
     #if np.isnan(np.sum(b)):
     #    print('nan b, h = ', b, H0, length)
 
-    return jax.vmap(comp_weight, (0,None))(neighbors, b)
+    pouWeights = jax.vmap(comp_weight, (0,None))(neighbors, b)
+
+    pouWeights /= np.sum(pouWeights)
+
+    return pouWeights
 
 
-def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords):
+def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords, requireLinearComplete):
     
     activeNodes = onp.zeros_like(coords)[:,0]
     activate_nodes(nodesToColors, nodesToBoundary, activeNodes)
@@ -222,7 +229,7 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
         maxLength = 0.0
         for f in polyFaces:
             # warning, this next function modifies activeNodes
-            active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes)
+            active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes, requireLinearComplete)
             maxLength = onp.maximum(maxLength, lengthScale)
             active = np.array(active)
             for iNode in inactive:

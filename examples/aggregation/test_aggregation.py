@@ -126,6 +126,7 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
     S,U = onp.linalg.eigh(qGq)
     nonzeroS = abs(S) > 1e-14
     Sinv = 1.0/S[nonzeroS]
+    print('num zeros = ', onp.sum(1.0 - nonzeroS))
     Uu = U[:, nonzeroS]
     qGqinv = Uu@onp.diag(Sinv)@Uu.T
 
@@ -134,7 +135,7 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
         for n in range(qGBs.shape[2]):
             qBs[:,d,n] = qGqinv@qGBs[:,d,n]
 
-    return qBs, onp.sum(G, axis=1), globalToLocalQuadNodes, globalToLocalShapeNodes
+    return qBs, onp.sum(qGq, axis=1), globalToLocalQuadNodes, globalToLocalShapeNodes
 
 #dofs = 3 * N - 6 = constraints = 6 * Q
 #Q >= N / 2 - 1
@@ -159,10 +160,10 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
         # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
         nodesToBoundary = coarsening.create_nodes_to_boundaries(self.mesh, ['bottom','top','right','left'])
         nodesToColors = coarsening.create_nodes_to_colors(self.mesh.conns, partitionElemField)
-        interpolation, activeNodalField = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, self.mesh.coords)
+        interpolation, activeNodalField = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, self.mesh.coords, requireLinearComplete=False)
 
         nodesToBoundary2 = coarsening.create_nodes_to_boundaries(self.mesh, ['bottom','top','right','left','top'])
-        interpolation2, activeNodalField2 = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary2, nodesToColors, self.mesh.coords)
+        interpolation2, activeNodalField2 = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary2, nodesToColors, self.mesh.coords, requireLinearComplete=True)
 
         for i,interp in enumerate(interpolation):
             self.assertTrue(len(interp[0])>0)
@@ -187,8 +188,24 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
 
         totalQuadratures = 0
         totalArea = 0.0
+
+        maxQuads = 0
+        maxNodes = 0
+
+        Bs = list()
+        Ws = list()
+        neighbors = list()
+
         for polyI, poly in enumerate(polyElems):
             B, W, g2lQuad, g2lShape = construct_basis_on_poly(polyElems[polyI], polyNodes[polyI], interpolation, interpolation2, self.mesh.conns, self.fs)
+
+            maxQuads = onp.maximum(maxQuads, len(W))
+            maxNodes = onp.maximum(maxNodes, len(g2lShape))
+
+            Bs.append(B)
+            Ws.append(W)
+            neighbors.append(g2lShape.keys)
+
             totalArea += onp.sum(W)
             totalQuadratures += len(W)
 
@@ -198,12 +215,13 @@ class PatchTestQuadraticElements(MeshFixture.MeshFixture):
                 grads[:,:] += B[:,:,localNode] * self.mesh.coords[globalNode,0]
             
             for q in range(B.shape[0]):
-              self.assertNear(1.0, grads[q,0], 7)
-              self.assertNear(0.0, grads[q,1], 7)
+                self.assertNear(1.0, grads[q,0], 7)
+                self.assertNear(0.0, grads[q,1], 7)
+
+        #BigB = 
 
         self.assertNear(2.0, totalArea, 8)
-
-        print('quadrature savings = ', totalQuadratures / len(self.mesh.conns))
+        print('quadrature savings = ', totalQuadratures, self.mesh.conns.shape[0])
 
         write_output(self.mesh, partitionElemField, [('active', activeNodalField),('active2', activeNodalField2)])
         print('wrote output')
