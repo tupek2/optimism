@@ -196,16 +196,14 @@ def rkpm(neighbors, coords, evalCoord, length):
 
     M = np.sum( jax.vmap(comp_m)(neighbors), axis=0 )
     M += 1e-10 * np.eye(dim+1)
-
     #if np.isnan(np.sum(np.sum(M))):
     #    print('nan M = ', M)
-
     H0 = np.array([1.0,0.0,0.0])
     b = np.linalg.solve(M, H0)
+    b += np.linalg.solve(M, H0 - M@b)
+    b += np.linalg.solve(M, H0 - M@b)
     #if np.isnan(np.sum(b)):
     #    print('nan b, h = ', b, H0, length)
-    b += np.linalg.solve(M, H0 - M@b)
-    #b += np.linalg.solve(M, H0 - M@b)
 
     return jax.vmap(comp_weight, (0,None))(neighbors, b)
 
