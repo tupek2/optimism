@@ -180,7 +180,7 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes):
     return active, inactive, lengthScale
 
 
-@jax.jit
+#@jax.jit
 def rkpm(neighbors, coords, evalCoord, length):
     dim = 2
     # setup moment matrix in 2D
@@ -195,11 +195,17 @@ def rkpm(neighbors, coords, evalCoord, length):
         return comp_h(I)@b
 
     M = np.sum( jax.vmap(comp_m)(neighbors), axis=0 )
-    M += 1e-11 * np.eye(dim+1)
+    M += 1e-10 * np.eye(dim+1)
+
+    #if np.isnan(np.sum(np.sum(M))):
+    #    print('nan M = ', M)
 
     H0 = np.array([1.0,0.0,0.0])
     b = np.linalg.solve(M, H0)
+    #if np.isnan(np.sum(b)):
+    #    print('nan b, h = ', b, H0, length)
     b += np.linalg.solve(M, H0 - M@b)
+    #b += np.linalg.solve(M, H0 - M@b)
 
     return jax.vmap(comp_weight, (0,None))(neighbors, b)
 
@@ -215,26 +221,34 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
         nodesOfPoly = polyNodes[p]
         polyFaces, polyExterior, polyInterior = divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly)
 
-        maxLength = 0
+        maxLength = 0.0
         for f in polyFaces:
             # warning, this next function modifies activeNodes
             active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes)
             maxLength = onp.maximum(maxLength, lengthScale)
-
+            active = np.array(active)
             for iNode in inactive:
-                weights = rkpm(np.array(active), coords, coords[iNode], lengthScale)
+                if lengthScale==0.0: lengthScale = 1.0
+                weights = rkpm(active, coords, coords[iNode], lengthScale)
                 interpolation[iNode] = (active, weights)
 
-        isActive = [int(v) for v in activeNodes[polyExterior]]
-        polyActiveExterior = polyExterior[isActive]
+        if (maxLength==0.0):
+            print('no length from face ', polyFaces)
+
+        polyActiveExterior = []
+        for n in polyExterior:
+            if activeNodes[n]:
+                polyActiveExterior.append(n)
+        polyActiveExterior = np.array(polyActiveExterior)
 
         for iNode in polyInterior:
-            weights = rkpm(np.array(polyActiveExterior), coords, coords[iNode], maxLength)
-            interpolation[iNode] = (active, weights)
+            if maxLength==0.0: maxLength = 1.0 # need to fix how length scales are computed
+            weights = rkpm(polyActiveExterior, coords, coords[iNode], maxLength)
+            interpolation[iNode] = (polyActiveExterior, weights)
 
     # all active nodes are their own neighbors with weight 1.  do this now that all actives/inactives are established
     for n in range(len(activeNodes)):
         if activeNodes[n]:
-            interpolation[n] = ([n], [1.0]) # neighbors and weights
+            interpolation[n] = (np.array([n]), np.array([1.0])) # neighbors and weights
 
     return interpolation, activeNodes
