@@ -111,7 +111,6 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
     return qBs, onp.sum(qGq, axis=1), globalToLocalQuadNodes, globalToLocalShapeNodes
 
 
-
 def construct_unstructured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs):
     maxQuads = 0
     maxNodes = 0
