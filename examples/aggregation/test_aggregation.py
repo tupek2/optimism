@@ -106,16 +106,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
     def test_poly_patch_test_all_dirichlet(self):
         # eventually use the dirichlet ones to precompute some initial strain offset/biases
-        partitionElemField, activeNodalField_q, dirichletActiveNodes, freeActiveNodes, activeNodalField_c, polyShapeGrads, polyVols, polyConns = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['all_boundary'])
+        partitionElemField, activeNodalField_q, activeNodalField_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['all_boundary'])
 
-        print("constructed reduced shape functions")
-
+        print("constructed reduced shape functions, test linear completeness")
         self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
         self.assertNear(2.0, onp.sum(polyVols), 8)
-
-        Uu = self.dofManager.get_unknown_values(self.dispTarget)
-        Ubc = self.dofManager.get_bc_values(self.dispTarget)
-        U = self.dofManager.create_field(Uu, Ubc)
 
         freeActiveNodes = np.array(freeActiveNodes, dtype=int)
 
@@ -123,24 +119,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         for n in freeActiveNodes:
             interiorIndicator[n] = 1.0
 
-        freeU = 0.9 * U[freeActiveNodes] # initial guess
-        freeU_shape = freeU.shape
-        freeU = freeU.ravel()
-
-        def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
-            U = self.dofManager.create_field(0.0*Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
-            U = U.at[freeActiveNodes].set(Uf.reshape(freeU_shape))
-            return total_energy(U, polyShapeGrads, polyVols, polyConns, self.materialModel)
-
-        p = Objective.Params(0.0)
-
-        print('free U shape = ', freeU.shape)
-
-        objective = Objective.Objective(energy, 0.0*freeU, p, None) # linearize about... for preconditioner, warm start
-        freeU = EqSolver.nonlinear_equation_solve(objective, freeU, p, trSettings, solver_algorithm=solver)
-
-        freeU = freeU.reshape(freeU_shape)
-        U = U.at[freeActiveNodes].set(freeU)
+        # consider how to do initial guess. hard to be robust without warm start
+        U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns)
 
         self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
 
@@ -150,6 +130,27 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      )
         print('wrote output')
 
+
+    def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns):
+        Uu = self.dofManager.get_unknown_values(self.dispTarget)
+        Ubc = self.dofManager.get_bc_values(self.dispTarget)
+        U = self.dofManager.create_field(Uu, Ubc)
+
+        freeUGuess = 0.9*U[freeActiveNodes]
+        freeU_shape = freeUGuess.shape
+        freeUGuess = freeUGuess.ravel()
+
+        def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
+            U = self.dofManager.create_field(0.0*Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
+            U = U.at[freeActiveNodes].set(Uf.reshape(freeU_shape))
+            return total_energy(U, polyShapeGrads, polyVols, polyConns, self.materialModel)
+
+        p = Objective.Params(0.0)
+
+        objective = Objective.Objective(energy, 0.0*freeUGuess, p, None) # linearize about... for preconditioner, warm start
+        freeU = EqSolver.nonlinear_equation_solve(objective, freeUGuess, p, trSettings, solver_algorithm=solver)
+        freeU = freeU.reshape(freeU_shape)
+        return U.at[freeActiveNodes].set(freeU)
     
 
     # geometric boundaries must cover the entire boundary.
@@ -175,9 +176,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.check_valid_interpolation(interpolation_c, activeNodalField_c)
 
         # shape gradient, volume, connectivies
-        Bs, Weights, GlobalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
+        polyShapeGrads, polyQuadVols, globalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
 
-        # determine list of active nodes
         allActiveNodes = []
         for n,isActive in enumerate(activeNodalField_c):
             if isActive:
@@ -185,9 +185,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         dirichletActiveNodes = coarsening.create_nodes_to_boundaries_if_active(self.mesh, dirichletBoundaries, activeNodalField_c)
         nonDirichletActiveNodes = [n for n in allActiveNodes if (n not in dirichletActiveNodes)]
-        #assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(allActiveNodes))
+        assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(allActiveNodes))
 
-        return partitionElemField,activeNodalField_q,dirichletActiveNodes,nonDirichletActiveNodes,activeNodalField_c,Bs,Weights,GlobalConnectivities
+        return partitionElemField,activeNodalField_q,activeNodalField_c,dirichletActiveNodes,nonDirichletActiveNodes,polyShapeGrads,polyQuadVols,globalConnectivities
 
 
     def check_valid_interpolation(self, interpolation, activeNodalField):
