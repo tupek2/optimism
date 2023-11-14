@@ -104,40 +104,32 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.materialModel = MatModel.create_material_model_functions(props)
 
 
-    def test_aggregation_and_interpolation(self):
-        partitionElemField, activeNodalField_q, nodesToBoundary_c, activeNodalField_c, polyShapeGrads, polyVols, polyConns = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['all_boundary'])
+    def test_poly_patch_test_all_dirichlet(self):
+        # eventually use the dirichlet ones to precompute some initial strain offset/biases
+        partitionElemField, activeNodalField_q, dirichletActiveNodes, freeActiveNodes, activeNodalField_c, polyShapeGrads, polyVols, polyConns = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['all_boundary'])
 
         print("constructed reduced shape functions")
 
-        # test some things, MRT delete once patch test is working
-        grads = jax.vmap(quadrature_grad, (None,0,0))(self.mesh.coords, polyShapeGrads, polyConns)
-        for p,polyGradUs in enumerate(grads): # all grads
-            for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
-                if polyVols[p,q] > 0: self.assertArrayNear(onp.eye(2), quadGradU, 7)
+        self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
         self.assertNear(2.0, onp.sum(polyVols), 8)
-        # end test some things
 
         Uu = self.dofManager.get_unknown_values(self.dispTarget)
         Ubc = self.dofManager.get_bc_values(self.dispTarget)
         U = self.dofManager.create_field(Uu, Ubc)
 
+        freeActiveNodes = np.array(freeActiveNodes, dtype=int)
+
         interiorIndicator = 0.0*activeNodalField_c.copy()
+        for n in freeActiveNodes:
+            interiorIndicator[n] = 1.0
 
-        freeNodes = []
-        for n, isActive in enumerate(activeNodalField_c):
-            if isActive and not n in nodesToBoundary_c:
-                freeNodes.append(n)
-                interiorIndicator[n] = 1.0
-
-        freeNodes = np.array(freeNodes, dtype=int)
-
-        freeU = 0.9 * U[freeNodes] # initial guess
+        freeU = 0.9 * U[freeActiveNodes] # initial guess
         freeU_shape = freeU.shape
         freeU = freeU.ravel()
 
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
             U = self.dofManager.create_field(0.0*Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
-            U = U.at[freeNodes].set(Uf.reshape(freeU_shape))
+            U = U.at[freeActiveNodes].set(Uf.reshape(freeU_shape))
             return total_energy(U, polyShapeGrads, polyVols, polyConns, self.materialModel)
 
         p = Objective.Params(0.0)
@@ -148,14 +140,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         freeU = EqSolver.nonlinear_equation_solve(objective, freeU, p, trSettings, solver_algorithm=solver)
 
         freeU = freeU.reshape(freeU_shape)
-        U = U.at[freeNodes].set(freeU)
+        U = U.at[freeActiveNodes].set(freeU)
 
-        # test some things
-        gradUs = jax.vmap(quadrature_grad, (None,0,0))(U, polyShapeGrads, polyConns)
-        for p,polyGradUs in enumerate(gradUs): # all grads
-            for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
-                if polyVols[p,q] > 0: self.assertArrayNear(self.targetDispGrad, quadGradU, 7)
-
+        self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
 
         write_output(self.mesh, partitionElemField,
                      [('active2', activeNodalField_q),('active', activeNodalField_c),('interior', interiorIndicator)],
@@ -163,6 +150,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      )
         print('wrote output')
 
+    
 
     # geometric boundaries must cover the entire boundary.
     # coarse nodes are maintained wherever the node is involved in 2 boundaries
@@ -188,7 +176,18 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         # shape gradient, volume, connectivies
         Bs, Weights, GlobalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
-        return partitionElemField,activeNodalField_q,nodesToBoundary_c,activeNodalField_c,Bs,Weights,GlobalConnectivities
+
+        # determine list of active nodes
+        allActiveNodes = []
+        for n,isActive in enumerate(activeNodalField_c):
+            if isActive:
+                allActiveNodes.append(n)
+
+        dirichletActiveNodes = coarsening.create_nodes_to_boundaries_if_active(self.mesh, dirichletBoundaries, activeNodalField_c)
+        nonDirichletActiveNodes = [n for n in allActiveNodes if (n not in dirichletActiveNodes)]
+        #assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(allActiveNodes))
+
+        return partitionElemField,activeNodalField_q,dirichletActiveNodes,nonDirichletActiveNodes,activeNodalField_c,Bs,Weights,GlobalConnectivities
 
 
     def check_valid_interpolation(self, interpolation, activeNodalField):
@@ -199,6 +198,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             for neighbor in interp[0]:
                 self.assertEqual(activeNodalField[neighbor], 1.0)
             self.assertNear(1.0, onp.sum(interp[1]), 8)
+
+
+    def check_expected_field_gradients(self, polyShapeGrads, polyVols, polyConns, U, expectedGradient):
+        gradUs = jax.vmap(quadrature_grad, (None,0,0))(U, polyShapeGrads, polyConns)
+        for p,polyGradUs in enumerate(gradUs): # all grads
+            for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
+                if polyVols[p,q] > 0: self.assertArrayNear(expectedGradient, quadGradU, 7)
 
 
 if __name__ == '__main__':

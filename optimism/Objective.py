@@ -79,7 +79,7 @@ class Objective:
 
     def __init__(self, f, x, p, precondStrategy=None):
 
-        self.precond = SparseCholesky()
+        self.precond = None #MRT, hack to turn off preconditioner #SparseCholesky() 
         self.precondStrategy = precondStrategy
         
         self.p = p
@@ -177,20 +177,21 @@ class Objective:
             return vx
 
     def update_precond(self, x):
-        if self.precondStrategy==None:
-            print('Updating with dense preconditioner in Objective.')
-            K = csc_matrix(self.hessian(x))
-            def stiffness_at_attempt(attempt):
-                if attempt==0:
-                    return K
-                else:
-                    dAbs = onp.abs(K.diagonal())
-                    shift = pow(10, (-5+attempt))
-                    return K + sparse_diags(shift * dAbs, 0, format='csc')
-            self.precond.update(stiffness_at_attempt)
-        else:
-            self.precondStrategy.initialize(x, self.p)
-            self.precond.update(self.precondStrategy.precond_at_attempt)
+        if self.precond:
+          if self.precondStrategy==None:
+              print('Updating with dense preconditioner in Objective.')
+              K = csc_matrix(self.hessian(x))
+              def stiffness_at_attempt(attempt):
+                  if attempt==0:
+                      return K
+                  else:
+                      dAbs = onp.abs(K.diagonal())
+                      shift = pow(10, (-5+attempt))
+                      return K + sparse_diags(shift * dAbs, 0, format='csc')
+              self.precond.update(stiffness_at_attempt)
+          else:
+              self.precondStrategy.initialize(x, self.p)
+              self.precond.update(self.precondStrategy.precond_at_attempt)
 
     def check_stability(self, x):
         if self.precond:

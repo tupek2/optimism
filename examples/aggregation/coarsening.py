@@ -42,6 +42,15 @@ def create_nodes_to_boundaries(mesh, boundaryNames):
     return nodesToBoundary
 
 
+def create_nodes_to_boundaries_if_active(mesh, boundaryNames, activeNodalField):
+    nodesToBoundary = {}
+    for s,set in enumerate(boundaryNames):
+        for n in mesh.nodeSets[set]:
+            if activeNodalField[n]:
+                set_value_insert(nodesToBoundary, n, s)
+    return nodesToBoundary
+
+
 def create_partitions(conns, numParts):
     graph = create_graph(conns)
     (edgecuts, parts) = metis.part_graph(graph, numParts, iptype='edge', rtype='greedy', contig=True, ncuts=1)
