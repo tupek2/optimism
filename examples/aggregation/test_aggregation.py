@@ -26,7 +26,7 @@ import optimism.Objective as Objective
 import optimism.EquationSolver as EqSolver
 
 #hint: _q means shape functions associated with quadrature rule
-#hint: _s means shape functions associated with field approximation shape functions
+#hint: _c means shape functions associated with coarse degrees of freedom
 
 useNewton=False
 if useNewton:
@@ -35,6 +35,22 @@ else:
     solver = EqSolver.trust_region_minimize
 
 trSettings = EqSolver.get_settings(max_trust_iters=400, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
+
+def quadrature_grad(field, shapeGrad, neighbors):
+    return shapeGrad@field[neighbors]
+
+def quadrature_energy(field, shapeGrad, volume, neighbors, material):
+    gradU = quadrature_grad(field, shapeGrad, neighbors)
+    gradU3x3 = TensorMath.tensor_2D_to_3D(gradU)
+    #MRT, hacking for now to assume no state variables
+    energyDensity = material.compute_energy_density(gradU3x3, np.array([0]), 0.0)
+    return volume * energyDensity
+
+def poly_energy(field, B, Vs, neighbors, material):
+    return np.sum( jax.vmap(quadrature_energy, (None,0,0,None,None))(field, B, Vs, neighbors, material) )
+
+def total_energy(field, B, Vs, neighbors, material):
+    return np.sum( jax.vmap(poly_energy, (None,0,0,0,None))(field, B, Vs, neighbors, material) )
 
 
 def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=None):
@@ -89,49 +105,17 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
 
     def test_aggregation_and_interpolation(self):
-        partitionElemField = coarsening.create_partitions(self.mesh.conns, numParts=self.numParts)
-        polyElems = coarsening.create_poly_elems(partitionElemField) # dict from poly number to elem numbers
-        polyNodes = coarsening.extract_poly_nodes(self.mesh.conns, polyElems) # dict from poly number to global node numbers
-
-        nodesToColors = coarsening.create_nodes_to_colors(self.mesh.conns, partitionElemField)
-
-        # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
-        nodesToBoundary_q = coarsening.create_nodes_to_boundaries(self.mesh, ['bottom','top','right','left'])
-        interpolation_q, activeNodalField_q = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False)
-
-        nodesToBoundary_c = coarsening.create_nodes_to_boundaries(self.mesh, ['bottom','top','right','left','all_boundary'])
-        interpolation_c, activeNodalField_c = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True)
-
-        self.check_valid_interpolation(interpolation_q, activeNodalField_q)
-        self.check_valid_interpolation(interpolation_c, activeNodalField_c)
-
-        Bs, Weights, Neighbors = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
+        partitionElemField, activeNodalField_q, nodesToBoundary_c, activeNodalField_c, polyShapeGrads, polyVols, polyConns = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['all_boundary'])
 
         print("constructed reduced shape functions")
 
-        def grad(field, shapeGrad, neighbors):
-            return shapeGrad@field[neighbors]
-        
         # test some things, MRT delete once patch test is working
-        grads = jax.vmap(grad, (None,0,0))(self.mesh.coords, Bs, Neighbors)
+        grads = jax.vmap(quadrature_grad, (None,0,0))(self.mesh.coords, polyShapeGrads, polyConns)
         for p,polyGradUs in enumerate(grads): # all grads
             for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
-                if Weights[p,q] > 0: self.assertArrayNear(onp.eye(2), quadGradU, 7)
-        self.assertNear(2.0, onp.sum(Weights), 8)
+                if polyVols[p,q] > 0: self.assertArrayNear(onp.eye(2), quadGradU, 7)
+        self.assertNear(2.0, onp.sum(polyVols), 8)
         # end test some things
-
-        def quadrature_energy(field, shapeGrad, volume, neighbors, material):
-            gradU = grad(field, shapeGrad, neighbors)
-            gradU3x3 = TensorMath.tensor_2D_to_3D(gradU)
-            #MRT, hacking for now to assume no state variables
-            energyDensity = material.compute_energy_density(gradU3x3, np.array([0]), 0.0)
-            return volume * energyDensity
-
-        def poly_energy(field, B, Vs, neighbors, material):
-            return np.sum( jax.vmap(quadrature_energy, (None,0,0,None,None))(field, B, Vs, neighbors, material) )
-
-        def total_energy(field, B, Vs, neighbors, material):
-            return np.sum( jax.vmap(poly_energy, (None,0,0,0,None))(field, B, Vs, neighbors, material) )
 
         Uu = self.dofManager.get_unknown_values(self.dispTarget)
         Ubc = self.dofManager.get_bc_values(self.dispTarget)
@@ -154,8 +138,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
             U = self.dofManager.create_field(0.0*Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
             U = U.at[freeNodes].set(Uf.reshape(freeU_shape))
-            return total_energy(U, Bs, Weights, Neighbors, self.materialModel)
-
+            return total_energy(U, polyShapeGrads, polyVols, polyConns, self.materialModel)
 
         p = Objective.Params(0.0)
 
@@ -168,17 +151,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         U = U.at[freeNodes].set(freeU)
 
         # test some things
-        gradUs = jax.vmap(grad, (None,0,0))(U, Bs, Neighbors)
+        gradUs = jax.vmap(quadrature_grad, (None,0,0))(U, polyShapeGrads, polyConns)
         for p,polyGradUs in enumerate(gradUs): # all grads
             for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
-                if Weights[p,q] > 0: self.assertArrayNear(self.targetDispGrad, quadGradU, 7)
+                if polyVols[p,q] > 0: self.assertArrayNear(self.targetDispGrad, quadGradU, 7)
 
-
-        #U = self.dofManager.create_field(Uu, Ubc)
-        #tEnergy = total_energy(0.0*self.mesh.coords, Bs, Weights, Neighbors, self.materialModel)
-        #print('total energy = ', tEnergy)
-
-        print("solved with sol norm = ", np.linalg.norm(Uu))
 
         write_output(self.mesh, partitionElemField,
                      [('active2', activeNodalField_q),('active', activeNodalField_c),('interior', interiorIndicator)],
@@ -187,12 +164,38 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         print('wrote output')
 
 
+    # geometric boundaries must cover the entire boundary.
+    # coarse nodes are maintained wherever the node is involved in 2 boundaries
+    def construct_coarse_fs(self, numParts, geometricBoundaries, dirichletBoundaries):
+        partitionElemField = coarsening.create_partitions(self.mesh.conns, numParts)
+        polyElems = coarsening.create_poly_elems(partitionElemField) # dict from poly number to elem numbers
+        polyNodes = coarsening.extract_poly_nodes(self.mesh.conns, polyElems) # dict from poly number to global node numbers
+
+        nodesToColors = coarsening.create_nodes_to_colors(self.mesh.conns, partitionElemField)
+
+        # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
+        nodesToBoundary_q = coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
+        interpolation_q, activeNodalField_q = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False)
+
+        approximationBoundaries = geometricBoundaries.copy()
+        for b in dirichletBoundaries: approximationBoundaries.append(b)
+        # Here we seem to need info on which nodes are part of Dirichlet ones
+        nodesToBoundary_c = coarsening.create_nodes_to_boundaries(self.mesh, approximationBoundaries)
+        interpolation_c, activeNodalField_c = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True)
+
+        self.check_valid_interpolation(interpolation_q, activeNodalField_q)
+        self.check_valid_interpolation(interpolation_c, activeNodalField_c)
+
+        # shape gradient, volume, connectivies
+        Bs, Weights, GlobalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
+        return partitionElemField,activeNodalField_q,nodesToBoundary_c,activeNodalField_c,Bs,Weights,GlobalConnectivities
+
+
     def check_valid_interpolation(self, interpolation, activeNodalField):
         for i,interp in enumerate(interpolation):
             self.assertTrue(len(interp[0])>0)
             if len(interp[0])==1:
-                self.assertEqual(activeNodalField[i], 1.0)
-                self.assertEqual(i,interp[0][0])
+                self.assertEqual(i, interp[0][0])
             for neighbor in interp[0]:
                 self.assertEqual(activeNodalField[neighbor], 1.0)
             self.assertNear(1.0, onp.sum(interp[1]), 8)

@@ -112,41 +112,40 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
 
 
 def construct_unstructured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs):
-    maxQuads = 0
-    maxNodes = 0
-
     Bs = list()
     Ws = list()
-    neighbors = list()
+    globalConnectivities = list()
 
     for polyI, poly in enumerate(polyElems):
         B, W, g2lQuad, g2lShape = construct_basis_on_poly(polyElems[polyI], polyNodes[polyI], interpolation, interpolation2, conns, fs)
-
-        maxQuads = onp.maximum(maxQuads, len(W))
-        maxNodes = onp.maximum(maxNodes, len(g2lShape))
-
         Bs.append(B)
         Ws.append(W)
-        neighbors.append(onp.fromiter(g2lShape.keys(), dtype=int))
+        globalConnectivities.append(onp.fromiter(g2lShape.keys(), dtype=int))
 
-    return maxQuads,maxNodes,Bs,Ws,neighbors
+    return Bs, Ws, globalConnectivities
 
 
 def construct_structured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs):
-    maxQuads, maxNodes, Bs, Ws, neighbors = construct_unstructured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs)
+    Bs, Ws, globalConnectivities = construct_unstructured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs)
 
+    numQuads = [B.shape[0] for B in Bs]
+    maxQuads = onp.max(numQuads)
+    numNodes = [B.shape[2] for B in Bs]
+    maxNodes = onp.max(numNodes)
+
+    # B stands for block?
     BB = onp.zeros((len(polyElems), maxQuads, 2, maxNodes))
     BW = onp.zeros((len(polyElems), maxQuads))
-    Bneighbors = onp.zeros((len(polyElems), maxNodes), dtype=onp.int_)
+    BGlobalConns = onp.zeros((len(polyElems), maxNodes), dtype=onp.int_)
     for p in range(len(polyElems)):
         B = Bs[p]
         BB[p,:B.shape[0],:,:B.shape[2]] = B
         W = Ws[p]
         BW[p,:W.shape[0]] = W
-        neighs = onp.array(neighbors[p])
-        Bneighbors[p,:neighs.shape[0]] = neighs
+        polyConn = onp.array(globalConnectivities[p])
+        BGlobalConns[p,:polyConn.shape[0]] = polyConn
 
     BB = np.array(BB)
     BW = np.array(BW)
-    Bneighbors = np.array(Bneighbors, dtype=np.int_)
-    return BB,BW,Bneighbors
+    BGlobalConns = np.array(BGlobalConns, dtype=np.int_)
+    return BB, BW, BGlobalConns
