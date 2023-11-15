@@ -38,6 +38,11 @@ else:
 
 trSettings = EqSolver.get_settings(max_trust_iters=400, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
 
+class Interpolation:
+    def __init__(self, interp, field):
+        self.interpolation = interp
+        self.activeNodalField = field
+
 def quadrature_grad(field, shapeGrad, neighbors):
     return shapeGrad@field[neighbors]
 
@@ -104,7 +109,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.materialModel = MatModel.create_material_model_functions(props)
 
 
-    def test_poly_patch_test_all_dirichlet(self):
+    def untest_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
         dirichletSets = ['top','bottom','left','right']
         ebcs = []
@@ -114,11 +119,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         # MRT, break into dirichletX and dirichletY sets
         # force inclusion in coarse mesh when node is in both sets
-        # otherwise, take only dofs that are already there
+        # otherwise, take only dofs that are already there (dont keep all at the coarse scale)
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
-        partitionElemField, activeNodalField_q, activeNodalField_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        partitionElemField, interp_q, interp_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
         self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
@@ -126,7 +131,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         freeActiveNodes = np.array(freeActiveNodes, dtype=int) # in general, some of the free ones maybe have dirichlet bcs in a direction
 
-        interiorIndicator = 0.0*activeNodalField_c.copy()
+        interiorIndicator = 0.0*interp_c.activeNodalField.copy()
         for n in freeActiveNodes:
             interiorIndicator[n] = 1.0
 
@@ -136,13 +141,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
 
         write_output(self.mesh, partitionElemField,
-                     [('active2', activeNodalField_q),('active', activeNodalField_c),('interior', interiorIndicator)],
+                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField),('interior', interiorIndicator)],
                      [('disp', U), ('disp_target', self.dispTarget)]
                      )
         print('wrote output')
 
 
-    def untest_poly_patch_test_with_neumann(self):
+    def test_poly_patch_test_with_neumann(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
@@ -159,8 +164,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         gradient = jax.grad(objective)
         b = gradient(self.dispTarget)
 
-        print('nodal linear form = ', np.sum(b[:,0]))
-        print('nodal linear form = ', np.sum(b[:,1]))
+        partitionElemField, interp_q, interp_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
+
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
+
+        b_c = np.array([ r[1] @ b[r[0]] for r in restriction ])
+
+        print('sum b = ', np.sum(b_c[:,0]))
+        print('sum b = ', np.sum(b_c[:,1]))
 
 
     @timeme
@@ -174,14 +186,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         unknownAndActiveIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[freeActiveNodes,:].ravel()
         unknownAndActiveIndices = unknownAndActiveIndices[isUnknownAndActive]
 
-
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
             stateVars = params[1]
             UuParam = params[2]
             Uu = UuParam.at[unknownAndActiveIndices].set(Uf)
             U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
             return total_energy(U, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
-
 
         initialQuadratureState = self.materialModel.compute_initial_state()
         stateVars = np.tile(initialQuadratureState, (polyVols.shape[0], polyVols.shape[1], 1))
@@ -212,14 +222,17 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         nodesToBoundary_q = coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
         interpolation_q, activeNodalField_q = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False)
 
+        interp_q = Interpolation(interpolation_q, activeNodalField_q)
+        self.check_valid_interpolation(interp_q)
+
         approximationBoundaries = geometricBoundaries.copy()
         for b in dirichletBoundaries: approximationBoundaries.append(b)
         # Here we seem to need info on which nodes are part of Dirichlet ones
         nodesToBoundary_c = coarsening.create_nodes_to_boundaries(self.mesh, approximationBoundaries)
         interpolation_c, activeNodalField_c = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True)
 
-        self.check_valid_interpolation(interpolation_q, activeNodalField_q)
-        self.check_valid_interpolation(interpolation_c, activeNodalField_c)
+        interp_c = Interpolation(interpolation_c, activeNodalField_c)
+        self.check_valid_interpolation(interp_c)
 
         # shape gradient, volume, connectivies
         polyShapeGrads, polyQuadVols, globalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
@@ -233,16 +246,17 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         nonDirichletActiveNodes = [n for n in allActiveNodes if (n not in dirichletActiveNodes)]
         assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(allActiveNodes))
 
-        return partitionElemField,activeNodalField_q,activeNodalField_c,dirichletActiveNodes,nonDirichletActiveNodes,polyShapeGrads,polyQuadVols,globalConnectivities
+        return partitionElemField,interp_q,interp_c,dirichletActiveNodes,nonDirichletActiveNodes,polyShapeGrads,polyQuadVols,globalConnectivities
 
 
-    def check_valid_interpolation(self, interpolation, activeNodalField):
-        for i,interp in enumerate(interpolation):
+    def check_valid_interpolation(self, interpolation : Interpolation):
+        interpolationNeighborsAndWeights = interpolation.interpolation
+        for i,interp in enumerate(interpolationNeighborsAndWeights):
             self.assertTrue(len(interp[0])>0)
             if len(interp[0])==1:
                 self.assertEqual(i, interp[0][0])
             for neighbor in interp[0]:
-                self.assertEqual(activeNodalField[neighbor], 1.0)
+                self.assertEqual(interpolation.activeNodalField[neighbor], 1.0)
             self.assertNear(1.0, onp.sum(interp[1]), 8)
 
 

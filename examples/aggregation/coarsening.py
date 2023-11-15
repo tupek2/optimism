@@ -243,7 +243,7 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
             # warning, this next function modifies activeNodes
             active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes, requireLinearComplete)
             maxLength = onp.maximum(maxLength, lengthScale)
-            active = np.array(active)
+            active = np.array(active, dtype=int)
             for iNode in inactive:
                 if lengthScale==0.0: lengthScale = 1.0
                 weights = rkpm(active, coords, coords[iNode], lengthScale)
@@ -256,7 +256,7 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
         for n in polyExterior:
             if activeNodes[n]:
                 polyActiveExterior.append(n)
-        polyActiveExterior = np.array(polyActiveExterior)
+        polyActiveExterior = np.array(polyActiveExterior, dtype=int)
 
         for iNode in polyInterior:
             if maxLength==0.0: maxLength = 1.0 # need to fix how length scales are computed
@@ -266,6 +266,6 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
     # all active nodes are their own neighbors with weight 1.  do this now that all actives/inactives are established
     for n in range(len(activeNodes)):
         if activeNodes[n]:
-            interpolation[n] = (np.array([n]), np.array([1.0])) # neighbors and weights
+            interpolation[n] = (np.array([n], dtype=int), np.array([1.0])) # neighbors and weights
 
     return interpolation, activeNodes

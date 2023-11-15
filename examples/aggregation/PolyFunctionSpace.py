@@ -150,3 +150,35 @@ def construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpola
     BW = np.array(BW)
     BGlobalConns = np.array(BGlobalConns, dtype=np.int_)
     return BB, BW, BGlobalConns
+
+@timeme
+def construct_coarse_restriction(interpolation, freeActiveNodes, numFineNodes):
+    fineToCoarseField = -np.ones(numFineNodes, dtype=int)
+
+    # apply restriction only to free active nodes?
+    freeActiveNodes = np.array(freeActiveNodes, dtype=int)
+    numFreeNodes = len(freeActiveNodes)
+    fineToCoarseField = fineToCoarseField.at[freeActiveNodes].set(np.arange(numFreeNodes, dtype=int))
+
+    restriction = [list() for n in range(numFreeNodes)]
+
+    # transpose the interpolation and only consider non dirichlet (aka free) coarse nodes
+    for mynode,restrict in enumerate(interpolation):
+        mynode = int(mynode)
+        neighbors = restrict[0]
+        weights = restrict[1]
+
+        for n,node in enumerate(neighbors):
+            node = node
+            coarseNodeId = fineToCoarseField[node]
+            if coarseNodeId >= 0:
+                if restriction[coarseNodeId]:
+                    restriction[coarseNodeId][0].append(mynode)
+                    restriction[coarseNodeId][1].append(weights[n])
+                else:
+                    restriction[coarseNodeId] = list(([mynode],[weights[n]]))
+
+    for r in restriction:
+        r[0] = np.array(r[0], dtype=int)
+        r[1] = np.array(r[1])
+    return restriction
