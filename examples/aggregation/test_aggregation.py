@@ -20,7 +20,8 @@ from optimism.FunctionSpace import DofManager
 import optimism.TensorMath as TensorMath
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
-from optimism.material import Neohookean as MatModel
+#from optimism.material import Neohookean as MatModel
+from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
 
 # solver stuff
@@ -77,6 +78,7 @@ def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=Non
                           cellData=partitions,
                           fieldType=VTKWriter.VTKFieldType.SCALARS)
     writer.write()
+    print('write successful')
 
 #dofs = 3 * N - 6 = constraints = 6 * Q
 #Q >= N / 2 - 1
@@ -103,6 +105,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         kappa = 10.0
         nu = 0.3
         E = 3*kappa*(1 - 2*nu)
+        self.E = E
+        self.nu = nu
         props = {'elastic modulus': E,
                  'poisson ratio': nu,
                  'version': 'coupled'}
@@ -117,34 +121,32 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             ebcs.append(EssentialBC(nodeSet=s, component=0))
             ebcs.append(EssentialBC(nodeSet=s, component=1))
 
-        # MRT, break into dirichletX and dirichletY sets
+        # MRT, maybe eventually break into dirichletX and dirichletY sets
         # force inclusion in coarse mesh when node is in both sets
         # otherwise, take only dofs that are already there (dont keep all at the coarse scale)
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
-        partitionElemField, interp_q, interp_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
-        self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
         self.assertNear(2.0, onp.sum(polyVols), 8)
-
-        freeActiveNodes = np.array(freeActiveNodes, dtype=int) # in general, some of the free ones maybe have dirichlet bcs in a direction
-
-        interiorIndicator = 0.0*interp_c.activeNodalField.copy()
-        for n in freeActiveNodes:
-            interiorIndicator[n] = 1.0
 
         # consider how to do initial guess. hard to be robust without warm start
         U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager)
 
-        self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
+
+        # output fields of interest
+        interiorIndicator = 0.0*interp_c.activeNodalField.copy()
+        for n in freeActiveNodes:
+            interiorIndicator[n] = 1.0
 
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField),('interior', interiorIndicator)],
                      [('disp', U), ('disp_target', self.dispTarget)]
                      )
-        print('wrote output')
 
 
     def test_poly_patch_test_with_neumann(self):
@@ -162,21 +164,44 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             return loadPotential
 
         gradient = jax.grad(objective)
+
+        self.dispTarget = 0.0 * self.dispTarget
         b = gradient(self.dispTarget)
 
-        partitionElemField, interp_q, interp_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
         restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
 
-        b_c = np.array([ r[1] @ b[r[0]] for r in restriction ])
+        @jax.jit
+        def apply_restriction(restriction, b):
+            return np.array([ r[1] @ b[r[0]] for r in restriction ])
+        
+        b_c = apply_restriction(restriction, b)
 
-        print('sum b = ', np.sum(b_c[:,0]))
-        print('sum b = ', np.sum(b_c[:,1]))
+        U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
+        U = apply_restriction(interp_c.interpolation, U)
+
+        # test we get exact solution
+
+        modulus1 = (1.0 - self.nu**2)/self.E
+        modulus2 = -self.nu*(1.0+self.nu)/self.E
+        dispGxx = (modulus1*sigma[0, 0] + modulus2*sigma[1, 1])
+        dispGyy = (modulus2*sigma[0, 0] + modulus1*sigma[1, 1])
+        UExact = np.column_stack( (dispGxx*self.mesh.coords[:,0],
+                                   dispGyy*self.mesh.coords[:,1]) )
+        
+        write_output(self.mesh, partitionElemField,
+                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
+                     [('disp', U), ('disp_target', UExact)]
+                     )
+        
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, U, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
+        self.assertArrayNear(U, UExact, 9)
 
 
     @timeme
-    def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager):
+    def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, rhs=None):
         UuGuess = dofManager.get_unknown_values(self.dispTarget)
         Ubc = dofManager.get_bc_values(self.dispTarget)
         U = dofManager.create_field(UuGuess, Ubc)
@@ -186,12 +211,17 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         unknownAndActiveIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[freeActiveNodes,:].ravel()
         unknownAndActiveIndices = unknownAndActiveIndices[isUnknownAndActive]
 
+        freeRhs = rhs.ravel()[isUnknownAndActive]
+
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
             stateVars = params[1]
             UuParam = params[2]
             Uu = UuParam.at[unknownAndActiveIndices].set(Uf)
             U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
-            return total_energy(U, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
+            rhsEnergy = 0.0
+            if not rhs is None:
+                rhsEnergy = freeRhs@Uf
+            return total_energy(U, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel) + rhsEnergy
 
         initialQuadratureState = self.materialModel.compute_initial_state()
         stateVars = np.tile(initialQuadratureState, (polyVols.shape[0], polyVols.shape[1], 1))
@@ -246,7 +276,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         nonDirichletActiveNodes = [n for n in allActiveNodes if (n not in dirichletActiveNodes)]
         assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(allActiveNodes))
 
-        return partitionElemField,interp_q,interp_c,dirichletActiveNodes,nonDirichletActiveNodes,polyShapeGrads,polyQuadVols,globalConnectivities
+        return partitionElemField,interp_q,interp_c,np.array(nonDirichletActiveNodes,dtype=int),polyShapeGrads,polyQuadVols,globalConnectivities
 
 
     def check_valid_interpolation(self, interpolation : Interpolation):
@@ -260,7 +290,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             self.assertNear(1.0, onp.sum(interp[1]), 8)
 
 
-    def check_expected_field_gradients(self, polyShapeGrads, polyVols, polyConns, U, expectedGradient):
+    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, U, expectedGradient):
         gradUs = jax.vmap(quadrature_grad, (None,0,0))(U, polyShapeGrads, polyConns)
         for p,polyGradUs in enumerate(gradUs): # all grads
             for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly

@@ -156,7 +156,6 @@ def construct_coarse_restriction(interpolation, freeActiveNodes, numFineNodes):
     fineToCoarseField = -np.ones(numFineNodes, dtype=int)
 
     # apply restriction only to free active nodes?
-    freeActiveNodes = np.array(freeActiveNodes, dtype=int)
     numFreeNodes = len(freeActiveNodes)
     fineToCoarseField = fineToCoarseField.at[freeActiveNodes].set(np.arange(numFreeNodes, dtype=int))
 
