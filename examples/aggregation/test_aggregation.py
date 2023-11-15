@@ -6,6 +6,7 @@ import jax.numpy as np
 
 # testing stuff
 from optimism.test import MeshFixture
+from optimism.Timer import timeme
 
 # poly stuff
 import coarsening
@@ -20,13 +21,14 @@ import optimism.TensorMath as TensorMath
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
 from optimism.material import Neohookean as MatModel
+from optimism import Mechanics
 
 # solver stuff
 import optimism.Objective as Objective
 import optimism.EquationSolver as EqSolver
 
-#hint: _q means shape functions associated with quadrature rule
-#hint: _c means shape functions associated with coarse degrees of freedom
+# hint: _q means shape functions associated with quadrature rule (on coarse mesh)
+# hint: _c means shape functions associated with coarse degrees of freedom
 
 useNewton=False
 if useNewton:
@@ -39,18 +41,17 @@ trSettings = EqSolver.get_settings(max_trust_iters=400, t1=0.4, t2=1.5, eta1=1e-
 def quadrature_grad(field, shapeGrad, neighbors):
     return shapeGrad@field[neighbors]
 
-def quadrature_energy(field, shapeGrad, volume, neighbors, material):
+def quadrature_energy(field, stateVars, shapeGrad, volume, neighbors, material):
     gradU = quadrature_grad(field, shapeGrad, neighbors)
     gradU3x3 = TensorMath.tensor_2D_to_3D(gradU)
-    #MRT, hacking for now to assume no state variables
-    energyDensity = material.compute_energy_density(gradU3x3, np.array([0]), 0.0)
+    energyDensity = material.compute_energy_density(gradU3x3, np.array([0]), stateVars)
     return volume * energyDensity
 
-def poly_energy(field, B, Vs, neighbors, material):
-    return np.sum( jax.vmap(quadrature_energy, (None,0,0,None,None))(field, B, Vs, neighbors, material) )
+def poly_energy(field, stateVars, B, Vs, neighbors, material):
+    return np.sum( jax.vmap(quadrature_energy, (None,0,0,0,None,None))(field, stateVars, B, Vs, neighbors, material) )
 
-def total_energy(field, B, Vs, neighbors, material):
-    return np.sum( jax.vmap(poly_energy, (None,0,0,0,None))(field, B, Vs, neighbors, material) )
+def total_energy(field, stateVars, B, Vs, neighbors, material):
+    return np.sum( jax.vmap(poly_energy, (None,0,0,0,0,None))(field, stateVars, B, Vs, neighbors, material) )
 
 
 def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=None):
@@ -72,7 +73,6 @@ def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=Non
                           fieldType=VTKWriter.VTKFieldType.SCALARS)
     writer.write()
 
-
 #dofs = 3 * N - 6 = constraints = 6 * Q
 #Q >= N / 2 - 1
 
@@ -83,6 +83,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.Ny = 7
         self.numParts = 8
 
+        #self.Nx = 6
+        #self.Ny = 4
+        #self.numParts = 4
+
         xRange = [0.,2.]
         yRange = [0.,1.]
         self.targetDispGrad = np.array([[0.1, -0.2],[-0.3, 0.15]])
@@ -90,10 +94,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         self.quadRule = QuadratureRule.create_quadrature_rule_on_triangle(degree=1)
         self.fs = FunctionSpace.construct_function_space(self.mesh, self.quadRule)
-        
-        ebcs = [EssentialBC(nodeSet='all_boundary', component=0),
-                EssentialBC(nodeSet='all_boundary', component=1)]
-        self.dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
         kappa = 10.0
         nu = 0.3
@@ -105,22 +105,33 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
 
     def test_poly_patch_test_all_dirichlet(self):
-        # eventually use the dirichlet ones to precompute some initial strain offset/biases
-        partitionElemField, activeNodalField_q, activeNodalField_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['all_boundary'])
+        # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
+        dirichletSets = ['top','bottom','left','right']
+        ebcs = []
+        for s in dirichletSets:
+            ebcs.append(EssentialBC(nodeSet=s, component=0))
+            ebcs.append(EssentialBC(nodeSet=s, component=1))
 
-        print("constructed reduced shape functions, test linear completeness")
+        # MRT, break into dirichletX and dirichletY sets
+        # force inclusion in coarse mesh when node is in both sets
+        # otherwise, take only dofs that are already there
+
+        dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
+
+        partitionElemField, activeNodalField_q, activeNodalField_c, dirichletActiveNodes, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
+
         self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
         self.assertNear(2.0, onp.sum(polyVols), 8)
 
-        freeActiveNodes = np.array(freeActiveNodes, dtype=int)
+        freeActiveNodes = np.array(freeActiveNodes, dtype=int) # in general, some of the free ones maybe have dirichlet bcs in a direction
 
         interiorIndicator = 0.0*activeNodalField_c.copy()
         for n in freeActiveNodes:
             interiorIndicator[n] = 1.0
 
         # consider how to do initial guess. hard to be robust without warm start
-        U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns)
+        U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager)
 
         self.check_expected_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
 
@@ -131,30 +142,65 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         print('wrote output')
 
 
-    def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns):
-        Uu = self.dofManager.get_unknown_values(self.dispTarget)
-        Ubc = self.dofManager.get_bc_values(self.dispTarget)
-        U = self.dofManager.create_field(Uu, Ubc)
+    def untest_poly_patch_test_with_neumann(self):
+        ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+                FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
+        dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
+        
+        sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
+        traction_func = lambda x, n: np.dot(sigma, n)     
+        edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
+        
+        def objective(U):
+            loadPotential = Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['right'], traction_func)
+            loadPotential += Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['top'], traction_func)
+            return loadPotential
 
-        freeUGuess = 0.9*U[freeActiveNodes]
-        freeU_shape = freeUGuess.shape
-        freeUGuess = freeUGuess.ravel()
+        gradient = jax.grad(objective)
+        b = gradient(self.dispTarget)
+
+        print('nodal linear form = ', np.sum(b[:,0]))
+        print('nodal linear form = ', np.sum(b[:,1]))
+
+
+    @timeme
+    def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager):
+        UuGuess = dofManager.get_unknown_values(self.dispTarget)
+        Ubc = dofManager.get_bc_values(self.dispTarget)
+        U = dofManager.create_field(UuGuess, Ubc)
+
+        # some of the free active nodes have dirichlet in a direction, so should be removed from free unknowns list
+        isUnknownAndActive = dofManager.isUnknown[freeActiveNodes,:].ravel()
+        unknownAndActiveIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[freeActiveNodes,:].ravel()
+        unknownAndActiveIndices = unknownAndActiveIndices[isUnknownAndActive]
+
 
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
-            U = self.dofManager.create_field(0.0*Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
-            U = U.at[freeActiveNodes].set(Uf.reshape(freeU_shape))
-            return total_energy(U, polyShapeGrads, polyVols, polyConns, self.materialModel)
+            stateVars = params[1]
+            UuParam = params[2]
+            Uu = UuParam.at[unknownAndActiveIndices].set(Uf)
+            U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
+            return total_energy(U, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
 
-        p = Objective.Params(0.0)
 
+        initialQuadratureState = self.materialModel.compute_initial_state()
+        stateVars = np.tile(initialQuadratureState, (polyVols.shape[0], polyVols.shape[1], 1))
+
+        p = Objective.Params(0.0, stateVars, UuGuess)
+
+        freeUGuess = 0.9 * UuGuess[unknownAndActiveIndices]
         objective = Objective.Objective(energy, 0.0*freeUGuess, p, None) # linearize about... for preconditioner, warm start
-        freeU = EqSolver.nonlinear_equation_solve(objective, freeUGuess, p, trSettings, solver_algorithm=solver)
-        freeU = freeU.reshape(freeU_shape)
-        return U.at[freeActiveNodes].set(freeU)
+        freeU = EqSolver.nonlinear_equation_solve(objective, freeUGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
+
+        Uu = UuGuess.at[unknownAndActiveIndices].set(freeU)
+        U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
+
+        return U
     
 
     # geometric boundaries must cover the entire boundary.
     # coarse nodes are maintained wherever the node is involved in 2 boundaries
+    @timeme
     def construct_coarse_fs(self, numParts, geometricBoundaries, dirichletBoundaries):
         partitionElemField = coarsening.create_partitions(self.mesh.conns, numParts)
         polyElems = coarsening.create_poly_elems(partitionElemField) # dict from poly number to elem numbers

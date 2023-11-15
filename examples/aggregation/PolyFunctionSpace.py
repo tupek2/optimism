@@ -1,8 +1,9 @@
 import numpy as onp
 import jax.numpy as np
+from optimism.Timer import timeme
 
-
-def construct_grad_op_pieces_on_poly(polyElems, polyNodes, conns, fs):
+@timeme
+def construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, fs):
     globalNodeToLocalNode = {node : n for n,node in enumerate(polyNodes)}
     numFineNodes = len(polyNodes)
 
@@ -35,9 +36,9 @@ def construct_grad_op_pieces_on_poly(polyElems, polyNodes, conns, fs):
 
     return G, GB, globalNodeToLocalNode
 
-
+@timeme
 def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp, conns, fs):
-    G, GB, globalToLocalNodes = construct_grad_op_pieces_on_poly(polyElems, polyNodes, conns, fs)
+    G, GB, globalToLocalNodes = construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, fs)
 
     globalToLocalQuadNodes = {}
     for node in polyNodes:
@@ -110,23 +111,23 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
 
     return qBs, onp.sum(qGq, axis=1), globalToLocalQuadNodes, globalToLocalShapeNodes
 
-
-def construct_unstructured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs):
+@timeme
+def construct_unstructured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, conns, fs):
     Bs = list()
     Ws = list()
     globalConnectivities = list()
 
     for polyI, poly in enumerate(polyElems):
-        B, W, g2lQuad, g2lShape = construct_basis_on_poly(polyElems[polyI], polyNodes[polyI], interpolation, interpolation2, conns, fs)
+        B, W, g2lQuad, g2lShape = construct_basis_on_poly(polyElems[polyI], polyNodes[polyI], interpolation_q, interpolation_c, conns, fs)
         Bs.append(B)
         Ws.append(W)
         globalConnectivities.append(onp.fromiter(g2lShape.keys(), dtype=int))
 
     return Bs, Ws, globalConnectivities
 
-
-def construct_structured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs):
-    Bs, Ws, globalConnectivities = construct_unstructured_gradop(polyElems, polyNodes, interpolation, interpolation2, conns, fs)
+@timeme
+def construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, conns, fs):
+    Bs, Ws, globalConnectivities = construct_unstructured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, conns, fs)
 
     numQuads = [B.shape[0] for B in Bs]
     maxQuads = onp.max(numQuads)

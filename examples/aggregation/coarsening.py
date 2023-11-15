@@ -3,6 +3,7 @@ import metis
 import jax
 import jax.numpy as np
 from optimism import Mesh
+from optimism.Timer import timeme
 
 def set_value_insert(themap, key, value):
     key = int(key)
@@ -51,6 +52,7 @@ def create_nodes_to_boundaries_if_active(mesh, boundaryNames, activeNodalField):
     return nodesToBoundary
 
 
+@timeme
 def create_partitions(conns, numParts):
     graph = create_graph(conns)
     (edgecuts, parts) = metis.part_graph(graph, numParts, iptype='edge', rtype='greedy', contig=True, ncuts=1)
@@ -76,14 +78,14 @@ def activate_nodes(nodesToColors, nodesToBoundary, activeNodes):
         if (boundaryCount > 0 and colorCount > 1):
             activeNodes[n] = 1.0
 
-
+@timeme
 def create_poly_elems(partitionField):
     polys = {}
     for e,p in enumerate(partitionField):
         set_value_insert(polys, p, int(e))
     return polys
 
-
+@timeme
 def extract_poly_nodes(conns, polyElems):
     polyNodes = {}
     for p in polyElems:
@@ -224,6 +226,7 @@ def rkpm(neighbors, coords, evalCoord, length):
     return pouWeights
 
 
+@timeme
 def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords, requireLinearComplete):
     
     activeNodes = onp.zeros_like(coords)[:,0]

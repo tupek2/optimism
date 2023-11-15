@@ -12,7 +12,8 @@ setuptools.setup(
                       'metis'],
     #tests_require=[], # could put chex and pytest here
     extras_require={'sparse': ['scikit-sparse'],
-                    'test': ['pytest', 'pytest-cov', 'pytest-xdist']},
+                    'test': ['pytest', 'pytest-cov', 'pytest-xdist'],
+                    'timing-utils' : ['timebudget']},
     python_requires='>=3.7',
     version='0.0.1',
     license='MIT',
