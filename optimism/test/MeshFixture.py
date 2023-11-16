@@ -41,6 +41,7 @@ class MeshFixture(TestFixture):
                                             (coords[:,1] < yRange[0] + tol) |
                                             (coords[:,0] > xRange[1] - tol) |
                                             (coords[:,1] > yRange[1] - tol) )
+        nodeSets['all'+setNamePostFix] = np.flatnonzero((coords[:,0] >= -tol) | (coords[:,0] <= tol))
         
         def is_edge_on_left(xyOnEdge):
             return np.all( xyOnEdge[:,0] < xRange[0] + tol  )

@@ -91,7 +91,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.numParts = 15
 
         xRange = [0.,5.]
-        yRange = [0.,1.]
+        yRange = [0.,1.2]
         self.targetDispGrad = np.array([[0.1, -0.2],[-0.3, 0.15]])
         self.mesh, self.dispTarget = self.create_mesh_and_disp(self.Nx, self.Ny, xRange, yRange, lambda x : self.targetDispGrad.T@x)
 
@@ -201,13 +201,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 FunctionSpace.EssentialBC(nodeSet='left', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
+        print('size of all = ', self.mesh.nodeSets['all'].shape)
+
         partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'])
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left','right'], ['left']) #all is another option now
 
         restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
 
-        sigma = np.array([[-0.5, 0.0], [0.0, 0.0]])
-        traction_func = lambda x, n: np.dot(sigma, n)     
+        #sigma = np.array([[-0.5, 0.0], [0.0, 0.0]])
+        traction_func = lambda x, n: np.array([0.0, 0.1]) #np.dot(sigma, n)     
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
         
         def objective(U):
@@ -232,7 +234,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp_coarse', U_c), ('disp', U_f)])
+                     [('disp_coarse', U_c), ('disp', U_f), ('load', b), ('load_coarse', np.zeros_like(b).at[freeActiveNodes].set(b_c))])
 
     @timeme
     def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, rhs=None):
