@@ -61,8 +61,8 @@ class Timer(ContextDecorator):
 try:
     import timebudget.timebudget as timebudget
     def timeme(func):
-        return func  #timing disabled
-        #return timebudget(func)
+        #return func  #timing disabled
+        return timebudget(func)
 except:
     def timeme(func):
         return func

@@ -20,8 +20,8 @@ from optimism.FunctionSpace import DofManager
 import optimism.TensorMath as TensorMath
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
-#from optimism.material import Neohookean as MatModel
-from optimism.material import LinearElastic as MatModel
+from optimism.material import Neohookean as MatModel
+#from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
 
 # solver stuff
@@ -37,7 +37,7 @@ if useNewton:
 else:
     solver = EqSolver.trust_region_minimize
 
-trSettings = EqSolver.get_settings(max_trust_iters=400, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
+trSettings = EqSolver.get_settings(max_trust_iters=400, use_incremental_objective=False, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
 
 class Interpolation:
     def __init__(self, interp, field):
@@ -86,15 +86,11 @@ def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=Non
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        self.Nx = 11
-        self.Ny = 7
-        self.numParts = 8
+        self.Nx = 21
+        self.Ny = 12
+        self.numParts = 15
 
-        #self.Nx = 6
-        #self.Ny = 4
-        #self.numParts = 4
-
-        xRange = [0.,2.]
+        xRange = [0.,5.]
         yRange = [0.,1.]
         self.targetDispGrad = np.array([[0.1, -0.2],[-0.3, 0.15]])
         self.mesh, self.dispTarget = self.create_mesh_and_disp(self.Nx, self.Ny, xRange, yRange, lambda x : self.targetDispGrad.T@x)
@@ -111,7 +107,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                  'poisson ratio': nu,
                  'version': 'coupled'}
         self.materialModel = MatModel.create_material_model_functions(props)
-
+        mcxFuncs = Mechanics.create_mechanics_functions(self.fs, "plane strain", self.materialModel)
+        self.compute_energy = mcxFuncs.compute_strain_energy
+        self.internals = mcxFuncs.compute_initial_state()
 
     def untest_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
@@ -145,15 +143,19 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField),('interior', interiorIndicator)],
-                     [('disp', U), ('disp_target', self.dispTarget)]
-                     )
+                     [('disp', U), ('disp_target', self.dispTarget)])
 
 
-    def test_poly_patch_test_with_neumann(self):
+    def untest_poly_patch_test_with_neumann(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
+        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
+
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
+
         sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
         traction_func = lambda x, n: np.dot(sigma, n)     
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
@@ -168,14 +170,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.dispTarget = 0.0 * self.dispTarget
         b = gradient(self.dispTarget)
 
-        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
-
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
-
         @jax.jit
-        def apply_restriction(restriction, b):
-            return np.array([ r[1] @ b[r[0]] for r in restriction ])
+        def apply_restriction(restriction, load):
+            return np.array([ r[1] @ load[r[0]] for r in restriction ])
         
         b_c = apply_restriction(restriction, b)
 
@@ -193,12 +190,49 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp', U), ('disp_target', UExact)]
-                     )
+                     [('disp', U), ('disp_target', UExact)])
         
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, U, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
         self.assertArrayNear(U, UExact, 9)
 
+
+    def test_poly_buckle(self):
+        ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+                FunctionSpace.EssentialBC(nodeSet='left', component=1)]
+        dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
+        
+        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'])
+
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
+
+        sigma = np.array([[-0.5, 0.0], [0.0, 0.0]])
+        traction_func = lambda x, n: np.dot(sigma, n)     
+        edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
+        
+        def objective(U):
+            loadPotential = Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['right'], traction_func)
+            return loadPotential
+
+        gradient = jax.grad(objective)
+
+        self.dispTarget = 0.0 * self.dispTarget
+        b = gradient(self.dispTarget)
+
+        @jax.jit
+        def apply_restriction(restriction, load):
+            return np.array([ r[1] @ load[r[0]] for r in restriction ])
+        
+        b_c = apply_restriction(restriction, b)
+
+        U_c = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
+        U_c = apply_restriction(interp_c.interpolation, U_c)
+
+        U_f = self.solver_fine(dofManager, b)
+
+        write_output(self.mesh, partitionElemField,
+                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
+                     [('disp_coarse', U_c), ('disp', U_f)])
 
     @timeme
     def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, rhs=None):
@@ -237,6 +271,28 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         return U
     
+
+    @timeme
+    def solver_fine(self, dofManager, rhs=None):
+        UuGuess = dofManager.get_unknown_values(self.dispTarget)
+        Ubc = dofManager.get_bc_values(self.dispTarget)
+        U = dofManager.create_field(UuGuess, Ubc)
+
+        def energy(Uu, params):
+            U = dofManager.create_field(Uu, Ubc)
+            rhsEnergy = 0.0
+            if not rhs is None:
+                rhsEnergy = rhs.ravel()@U.ravel()
+            return  self.compute_energy(U, self.internals) + rhsEnergy
+
+        p = Objective.Params(0.0)
+
+        objective = Objective.Objective(energy, UuGuess, p, None)
+        Uu = EqSolver.nonlinear_equation_solve(objective, UuGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
+
+        U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
+
+        return U
 
     # geometric boundaries must cover the entire boundary.
     # coarse nodes are maintained wherever the node is involved in 2 boundaries

@@ -79,7 +79,8 @@ class Objective:
 
     def __init__(self, f, x, p, precondStrategy=None):
 
-        self.precond = None #MRT, hack to turn off preconditioner #SparseCholesky() 
+        #self.precond = None  # MRT, hack to turn off preconditioner #SparseCholesky() 
+        self.precond = SparseCholesky() 
         self.precondStrategy = precondStrategy
         
         self.p = p
