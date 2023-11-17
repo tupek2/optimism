@@ -20,8 +20,8 @@ from optimism.FunctionSpace import DofManager
 import optimism.TensorMath as TensorMath
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
-from optimism.material import Neohookean as MatModel
-#from optimism.material import LinearElastic as MatModel
+#from optimism.material import Neohookean as MatModel
+from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
 
 # solver stuff
@@ -86,13 +86,18 @@ def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=Non
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        self.Nx = 21
-        self.Ny = 12
-        self.numParts = 15
+        self.Nx = 7
+        self.Ny = 4
+        self.numParts = 4
+
+        #self.Nx = 42
+        #self.Ny = 24
+        #self.numParts = 70
 
         xRange = [0.,5.]
         yRange = [0.,1.2]
         self.targetDispGrad = np.array([[0.1, -0.2],[-0.3, 0.15]])
+        self.expectedVolume = (xRange[1]-xRange[0]) * (yRange[1]-yRange[0])
         self.mesh, self.dispTarget = self.create_mesh_and_disp(self.Nx, self.Ny, xRange, yRange, lambda x : self.targetDispGrad.T@x)
 
         self.quadRule = QuadratureRule.create_quadrature_rule_on_triangle(degree=1)
@@ -111,7 +116,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.compute_energy = mcxFuncs.compute_strain_energy
         self.internals = mcxFuncs.compute_initial_state()
 
-    def untest_poly_patch_test_all_dirichlet(self):
+    def test_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
         dirichletSets = ['top','bottom','left','right']
         ebcs = []
@@ -129,7 +134,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
-        self.assertNear(2.0, onp.sum(polyVols), 8)
+        self.assertNear(self.expectedVolume, onp.sum(polyVols), 8)
 
         # consider how to do initial guess. hard to be robust without warm start
         U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager)
@@ -146,7 +151,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('disp', U), ('disp_target', self.dispTarget)])
 
 
-    def untest_poly_patch_test_with_neumann(self):
+    def test_poly_patch_test_with_neumann(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
@@ -196,24 +201,31 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.assertArrayNear(U, UExact, 9)
 
 
-    def test_poly_buckle(self):
+    def untest_poly_buckle(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='left', component=1)]
+        #dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
+        
+        #partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        #  = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left','right'], ['left'])
+
+        #ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+        #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        print('size of all = ', self.mesh.nodeSets['all'].shape)
-
         partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left','right'], ['left']) #all is another option now
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
         restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
 
-        #sigma = np.array([[-0.5, 0.0], [0.0, 0.0]])
-        traction_func = lambda x, n: np.array([0.0, 0.1]) #np.dot(sigma, n)     
+        #sigma = np.array([[-0.5, 0.0], [0.0, 0.3]])
+        #traction_func = lambda x, n: np.dot(sigma, n)
+        traction_func = lambda x, n: np.array([0.0, 0.06])
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
         
         def objective(U):
             loadPotential = Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['right'], traction_func)
+            loadPotential += Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['top'], traction_func)
             return loadPotential
 
         gradient = jax.grad(objective)
@@ -223,9 +235,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         @jax.jit
         def apply_restriction(restriction, load):
-            return np.array([ r[1] @ load[r[0]] for r in restriction ])
+            return np.array([r[1] @ load[r[0]] for r in restriction])
         
         b_c = apply_restriction(restriction, b)
+
+        coarseStiffnesses = ()
+        for p,poly in enumerate(poly):
+            print(4)
+
+        #for neighbors,weights in interp_c
 
         U_c = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
         U_c = apply_restriction(interp_c.interpolation, U_c)
@@ -247,7 +265,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         unknownAndActiveIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[freeActiveNodes,:].ravel()
         unknownAndActiveIndices = unknownAndActiveIndices[isUnknownAndActive]
 
-        freeRhs = rhs.ravel()[isUnknownAndActive]
+        freeRhs = rhs.ravel()[isUnknownAndActive] if not rhs is None else None
 
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
             stateVars = params[1]
@@ -255,7 +273,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             Uu = UuParam.at[unknownAndActiveIndices].set(Uf)
             U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
             rhsEnergy = 0.0
-            if not rhs is None:
+            if not freeRhs is None:
                 rhsEnergy = freeRhs@Uf
             return total_energy(U, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel) + rhsEnergy
 
@@ -270,9 +288,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         Uu = UuGuess.at[unknownAndActiveIndices].set(freeU)
         U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
-
         return U
-    
 
     @timeme
     def solver_fine(self, dofManager, rhs=None):
@@ -293,7 +309,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Uu = EqSolver.nonlinear_equation_solve(objective, UuGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
         U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
-
         return U
 
     # geometric boundaries must cover the entire boundary.

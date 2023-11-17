@@ -49,12 +49,6 @@ def create_nodes_to_boundaries_if_active(mesh, boundaryNames, activeNodalField):
         for n in mesh.nodeSets[set]:
             if activeNodalField[n]:
                 set_value_insert(nodesToBoundary, n, s)
-    maxBoundary = len(boundaryNames)
-
-    # begin clever way to get all nodes in coarse which did not work
-    #for n in range(mesh.coords.shape[0]):
-    #    set_value_insert(nodesToBoundary, n, maxBoundary)
-    # end clever way to get all nodes in coarse
     return nodesToBoundary
 
 
