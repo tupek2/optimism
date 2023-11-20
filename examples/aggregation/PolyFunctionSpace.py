@@ -2,6 +2,22 @@ import numpy as onp
 import jax.numpy as np
 from optimism.Timer import timeme
 
+# data class
+from chex._src.dataclass import dataclass
+from chex._src import pytypes
+
+
+@dataclass(frozen=True, mappable_dataclass=True)
+class Polyhedral:
+    fineNodes : pytypes.ArrayDevice
+    coarseNodes: pytypes.ArrayDevice
+    fineElems : pytypes.ArrayDevice
+
+    interpolation : pytypes.ArrayDevice
+    shapeGrad : pytypes.ArrayDevice
+    weights : pytypes.ArrayDevice
+
+
 @timeme
 def construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, fs):
     globalNodeToLocalNode = {node : n for n,node in enumerate(polyNodes)}
@@ -112,10 +128,13 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
     return qBs, onp.sum(qGq, axis=1), globalToLocalQuadNodes, globalToLocalShapeNodes
 
 @timeme
-def construct_unstructured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, conns, fs):
+def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs):
     Bs = list()
     Ws = list()
     globalConnectivities = list()
+
+    interpolation_q = interpolationAndField_q.interpolation
+    interpolation_c = interpolationAndField_c.interpolation
 
     for polyI, poly in enumerate(polyElems):
         B, W, g2lQuad, g2lShape = construct_basis_on_poly(polyElems[polyI], polyNodes[polyI], interpolation_q, interpolation_c, conns, fs)
@@ -123,11 +142,48 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolation_q, interpo
         Ws.append(W)
         globalConnectivities.append(onp.fromiter(g2lShape.keys(), dtype=int))
 
-    return Bs, Ws, globalConnectivities
+    activeNodeField_c = interpolationAndField_c.activeNodalField
+    coarseToFineNodes = onp.array([n for n,x in enumerate(activeNodeField_c) if x], dtype=int)
+    fineToCoarseNodes = -onp.ones_like(interpolationAndField_c.activeNodalField, dtype=int)
+    fineToCoarseNodes[coarseToFineNodes] = onp.arange(coarseToFineNodes.shape[0], dtype=int)
+    #fineToCoarseNodes = fineToCoarseNodes.at.set(np.arange(coarseToFineNodes.shape[0]))
+
+    polys = list()
+    for polyI, polyE in enumerate(polyElems):
+        print('pnodes=', list(polyNodes[polyI]))
+        fineNodes = onp.array(list(polyNodes[polyI]), dtype=int)
+        coarseNodes = onp.array([x for x in fineToCoarseNodes[fineNodes] if x > -1])
+        localCoarseToFineNodes = onp.array([x for x in fineNodes if fineToCoarseNodes[x] > -1])
+        fineToLocalCoarseIndex = {node:n for n,node in enumerate(localCoarseToFineNodes)}
+        interpMatrix = onp.zeros((len(fineNodes),len(coarseNodes)))
+
+        for n_f,node in enumerate(fineNodes):
+            interpNeighbors = interpolation_c[node][0]
+            interpWeights = interpolation_c[node][1]
+            for n_c,neighbor in enumerate(interpNeighbors):
+                neighbor = int(neighbor)
+                localCoarseIndex = fineToLocalCoarseIndex[neighbor]
+                interpMatrix[n_f,localCoarseIndex] += interpWeights[n_c]
+
+        B = Bs[polyI]
+        W = Ws[polyI]
+        shapeGrad = onp.zeros( (B.shape[0], B.shape[1], len(coarseNodes)) )
+
+        print("w = ", W)
+
+        for n,fineNode in enumerate(globalConnectivities[polyI]):
+            localCoarseIndex = fineToLocalCoarseIndex[fineNode]
+            shapeGrad[:,:,localCoarseIndex] = B[:,:,n]
+
+        poly = Polyhedral(fineNodes=fineNodes, coarseNodes=coarseNodes, fineElems=polyElems[polyI],
+                          interpolation=interpMatrix, shapeGrad=shapeGrad, weights=W)
+        polys.append(poly)
+
+    return Bs, Ws, globalConnectivities, polys
 
 @timeme
-def construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, conns, fs):
-    Bs, Ws, globalConnectivities = construct_unstructured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, conns, fs)
+def construct_structured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs):
+    Bs, Ws, globalConnectivities, polys = construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs)
 
     numQuads = [B.shape[0] for B in Bs]
     maxQuads = onp.max(numQuads)
@@ -150,6 +206,7 @@ def construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpola
     BW = np.array(BW)
     BGlobalConns = np.array(BGlobalConns, dtype=np.int_)
     return BB, BW, BGlobalConns
+
 
 @timeme
 def construct_coarse_restriction(interpolation, freeActiveNodes, numFineNodes):

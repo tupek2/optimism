@@ -28,6 +28,7 @@ from optimism import Mechanics
 import optimism.Objective as Objective
 import optimism.EquationSolver as EqSolver
 
+
 # hint: _q means shape functions associated with quadrature rule (on coarse mesh)
 # hint: _c means shape functions associated with coarse degrees of freedom
 
@@ -38,6 +39,7 @@ else:
     solver = EqSolver.trust_region_minimize
 
 trSettings = EqSolver.get_settings(max_trust_iters=400, use_incremental_objective=False, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
+
 
 class Interpolation:
     def __init__(self, interp, field):
@@ -115,6 +117,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         mcxFuncs = Mechanics.create_mechanics_functions(self.fs, "plane strain", self.materialModel)
         self.compute_energy = mcxFuncs.compute_strain_energy
         self.internals = mcxFuncs.compute_initial_state()
+
 
     def test_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
@@ -338,7 +341,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.check_valid_interpolation(interp_c)
 
         # shape gradient, volume, connectivies
-        polyShapeGrads, polyQuadVols, globalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interpolation_q, interpolation_c, self.mesh.conns, self.fs)
+        polyShapeGrads, polyQuadVols, globalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
 
         allActiveNodes = []
         for n,isActive in enumerate(activeNodalField_c):
