@@ -211,16 +211,15 @@ def construct_structured_gradop(polyElems, polyNodes, interpolationAndField_q, i
 
 
 @timeme
-def construct_coarse_restriction(interpolation, freeActiveNodes, numFineNodes):
+def construct_coarse_restriction(interpolation, coarseToFineNodes, numFineNodes):
     fineToCoarseField = -np.ones(numFineNodes, dtype=int)
 
-    # apply restriction only to free active nodes?
-    numFreeNodes = len(freeActiveNodes)
-    fineToCoarseField = fineToCoarseField.at[freeActiveNodes].set(np.arange(numFreeNodes, dtype=int))
+    numCoarseNodes = len(coarseToFineNodes)
+    fineToCoarseField = fineToCoarseField.at[coarseToFineNodes].set(np.arange(numCoarseNodes, dtype=int))
 
-    restriction = [list() for n in range(numFreeNodes)]
+    restriction = [list() for n in range(numCoarseNodes)]
 
-    # transpose the interpolation and only consider non dirichlet (aka free) coarse nodes
+    # transpose the interpolation and only consider coarse nodes
     for mynode,restrict in enumerate(interpolation):
         mynode = int(mynode)
         neighbors = restrict[0]

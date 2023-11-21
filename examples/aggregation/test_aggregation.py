@@ -136,24 +136,19 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
-        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords, onp.eye(2))
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, polyConnsCoarse, coarseToFineNodes, self.mesh.coords, onp.eye(2))
         self.assertNear(self.expectedVolume, onp.sum(polyVols), 8)
 
         # consider how to do initial guess. hard to be robust without warm start
-        U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager)
+        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, dofManager)
 
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, U, self.targetDispGrad)
-
-        # output fields of interest
-        interiorIndicator = 0.0*interp_c.activeNodalField.copy()
-        for n in freeActiveNodes:
-            interiorIndicator[n] = 1.0
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, polyConnsCoarse, coarseToFineNodes, U, self.targetDispGrad)
 
         write_output(self.mesh, partitionElemField,
-                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField),('interior', interiorIndicator)],
+                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
                      [('disp', U), ('disp_target', self.dispTarget)])
 
 
@@ -162,10 +157,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes, len(interp_c.activeNodalField))
 
         sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
         traction_func = lambda x, n: np.dot(sigma, n)     
@@ -182,12 +177,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         b = gradient(self.dispTarget)
 
         @jax.jit
-        def apply_operator(restriction, load):
-            return np.array([ r[1] @ load[r[0]] for r in restriction ])
+        def apply_operator(linearop, load):
+            return np.array([ r[1] @ load[r[0]] for r in linearop ])
         
         b_c = apply_operator(restriction, b)
 
-        U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
+        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, dofManager, b_c)
         U = apply_operator(interp_c.interpolation, U)
 
         # test we get exact solution
@@ -203,7 +198,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
                      [('disp', U), ('disp_target', UExact)])
         
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, U, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, polyConnsCoarse, coarseToFineNodes, U, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
         self.assertArrayNear(U, UExact, 9)
 
 
@@ -219,10 +214,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        partitionElemField, interp_q, interp_c, freeActiveNodes, polyShapeGrads, polyVols, polyConns \
+        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, freeActiveNodes, len(interp_c.activeNodalField))
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes, len(interp_c.activeNodalField))
 
         #sigma = np.array([[-0.5, 0.0], [0.0, 0.3]])
         #traction_func = lambda x, n: np.dot(sigma, n)
@@ -245,36 +240,36 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         
         b_c = apply_sparse_operator(restriction, b)
 
-        coarseStiffnesses = ()
-        for p,poly in enumerate(poly):
-            print(4)
+        #coarseStiffnesses = ()
+        #for p,poly in enumerate(poly):
+        #    print(4)
 
-        U_c = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
+        U_c = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, dofManager, b_c)
         U_c = apply_sparse_operator(interp_c.interpolation, U_c)
 
         U_f = self.solver_fine(dofManager, b)
 
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp_coarse', U_c), ('disp', U_f), ('load', b), ('load_coarse', np.zeros_like(b).at[freeActiveNodes].set(b_c))])
+                     [('disp_coarse', U_c), ('disp', U_f), ('load', b), ('load_coarse', np.zeros_like(b).at[coarseToFineNodes].set(b_c))])
 
     @timeme
-    def solver_coarse(self, freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, rhs=None):
+    def solver_coarse(self, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, dofManager, rhs=None):
         UuGuess = dofManager.get_unknown_values(self.dispTarget)
         Ubc = dofManager.get_bc_values(self.dispTarget)
         U = dofManager.create_field(UuGuess, Ubc)
 
         # some of the free active nodes have dirichlet in a direction, so should be removed from free unknowns list
-        isUnknownAndActive = dofManager.isUnknown[freeActiveNodes,:].ravel()
-        unknownAndActiveIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[freeActiveNodes,:].ravel()
-        unknownAndActiveIndices = unknownAndActiveIndices[isUnknownAndActive]
+        isCoarseUnknown = dofManager.isUnknown[coarseToFineNodes,:].ravel()
+        coarseUnknownIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[coarseToFineNodes,:].ravel()
+        coarseUnknownIndices = coarseUnknownIndices[isCoarseUnknown]
 
-        freeRhs = rhs.ravel()[isUnknownAndActive] if not rhs is None else None
+        freeRhs = rhs.ravel()[isCoarseUnknown] if not rhs is None else None
 
         def energy(Uf, params): # MRT, how to pass arguments in here that are not for jit?
             stateVars = params[1]
             UuParam = params[2]
-            Uu = UuParam.at[unknownAndActiveIndices].set(Uf)
+            Uu = UuParam.at[coarseUnknownIndices].set(Uf)
             U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
             rhsEnergy = 0.0
             if not freeRhs is None:
@@ -286,11 +281,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         p = Objective.Params(0.0, stateVars, UuGuess)
 
-        freeUGuess = 0.9 * UuGuess[unknownAndActiveIndices]
+        freeUGuess = 0.9 * UuGuess[coarseUnknownIndices]
         objective = Objective.Objective(energy, 0.0*freeUGuess, p, None) # linearize about... for preconditioner, warm start
         freeU = EqSolver.nonlinear_equation_solve(objective, freeUGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
-        Uu = UuGuess.at[unknownAndActiveIndices].set(freeU)
+        Uu = UuGuess.at[coarseUnknownIndices].set(freeU)
         U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
         return U
 
@@ -346,10 +341,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
 
         dirichletActiveNodes = coarsening.create_nodes_to_boundaries_if_active(self.mesh, dirichletBoundaries, activeNodalField_c)
-        nonDirichletActiveNodes = [n for n in coarseToFineNodes if (n not in dirichletActiveNodes)]
+        nonDirichletActiveNodes = onp.array([n for n in coarseToFineNodes if (n not in dirichletActiveNodes)], dtype=int)
         assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(coarseToFineNodes))
 
-        return partitionElemField,interp_q,interp_c,np.array(nonDirichletActiveNodes,dtype=int),polyShapeGrads,polyQuadVols,globalConnectivities
+        return partitionElemField,interp_q,interp_c,coarseToFineNodes,polyShapeGrads,polyQuadVols,globalConnectivities,coarseConnectivities,polys
 
 
     def check_valid_interpolation(self, interpolation : Interpolation):
@@ -363,8 +358,14 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             self.assertNear(1.0, onp.sum(interp[1]), 8)
 
 
-    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, U, expectedGradient):
+    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, coarseToFine, U, expectedGradient):
         gradUs = jax.vmap(quadrature_grad, (None,0,0))(U, polyShapeGrads, polyConns)
+        for p,polyGradUs in enumerate(gradUs): # all grads
+            for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
+                if polyVols[p,q] > 0: self.assertArrayNear(expectedGradient, quadGradU, 7)
+
+        Ucoarse = U[coarseToFine]
+        gradUs = jax.vmap(quadrature_grad, (None,0,0))(Ucoarse, polyShapeGrads, polyConnsCoarse)
         for p,polyGradUs in enumerate(gradUs): # all grads
             for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
                 if polyVols[p,q] > 0: self.assertArrayNear(expectedGradient, quadGradU, 7)
