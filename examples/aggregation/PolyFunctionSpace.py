@@ -179,9 +179,7 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
     return polys, coarseToFineNodes
 
 @timeme
-def construct_structured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs):
-    polys, coarseToFineNodes = construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs)
-
+def construct_structured_gradop(polys):
     numQuads = [poly.shapeGrad.shape[0] for poly in polys]
     maxQuads = onp.max(numQuads)
     numNodes = [poly.shapeGrad.shape[2] for poly in polys]
@@ -202,7 +200,7 @@ def construct_structured_gradop(polyElems, polyNodes, interpolationAndField_q, i
     BB = np.array(BB)
     BW = np.array(BW)
     BCoarseConns = np.array(BCoarseConns, dtype=np.int_)
-    return BB, BW, BCoarseConns, polys, coarseToFineNodes
+    return BB, BW, BCoarseConns
 
 
 @timeme

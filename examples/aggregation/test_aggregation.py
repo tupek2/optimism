@@ -332,9 +332,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         interp_c = Interpolation(interpolation=interpolation_c, activeNodalField=activeNodalField_c)
         self.check_valid_interpolation(interp_c)
 
-        # shape gradient, volume, connectivies
-        polyShapeGrads, polyQuadVols, coarseConnectivities, polys, coarseToFineNodes = \
-          PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
+        polys, coarseToFineNodes = PolyFunctionSpace.construct_unstructured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
+        polyShapeGrads, polyQuadVols, coarseConnectivities = PolyFunctionSpace.construct_structured_gradop(polys)
 
         return partitionElemField,interp_q,interp_c,coarseToFineNodes,polyShapeGrads,polyQuadVols,coarseConnectivities,polys
 
