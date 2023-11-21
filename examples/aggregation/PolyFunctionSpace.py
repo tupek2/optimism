@@ -147,7 +147,6 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
     coarseToFineNodes = onp.array([n for n,x in enumerate(activeNodeField_c) if x], dtype=int)
     fineToCoarseNodes = -onp.ones_like(interpolationAndField_c.activeNodalField, dtype=int)
     fineToCoarseNodes[coarseToFineNodes] = onp.arange(coarseToFineNodes.shape[0], dtype=int)
-    #fineToCoarseNodes = fineToCoarseNodes.at.set(np.arange(coarseToFineNodes.shape[0]))
 
     polys = list()
     for polyI, polyE in enumerate(polyElems):
@@ -177,11 +176,11 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
                           fineElems=polyE, interpolation=interpMatrix, shapeGrad=shapeGrad, weights=W)
         polys.append(poly)
 
-    return Bs, Ws, globalConnectivities, polys, coarseToFineNodes
+    return polys, coarseToFineNodes
 
 @timeme
 def construct_structured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs):
-    Bs, Ws, globalConnectivities, polys, coarseToFineNodes = construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs)
+    polys, coarseToFineNodes = construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs)
 
     numQuads = [poly.shapeGrad.shape[0] for poly in polys]
     maxQuads = onp.max(numQuads)
@@ -191,23 +190,19 @@ def construct_structured_gradop(polyElems, polyNodes, interpolationAndField_q, i
     # B stands for block?
     BB = onp.zeros((len(polys), maxQuads, 2, maxNodes))
     BW = onp.zeros((len(polys), maxQuads))
-    BFineConns = onp.zeros((len(polys), maxNodes), dtype=onp.int_)
     BCoarseConns = onp.zeros((len(polys), maxNodes), dtype=onp.int_)
     for p,poly in enumerate(polys):
         B = poly.shapeGrad
         BB[p,:B.shape[0],:,:B.shape[2]] = B
         W = poly.weights
         BW[p,:W.shape[0]] = W
-        polyConn = poly.localCoarseToFineNodes
-        BFineConns[p,:polyConn.shape[0]] = polyConn
         polyCoarseNodes = poly.coarseNodes
         BCoarseConns[p,:polyCoarseNodes.shape[0]] = polyCoarseNodes
 
     BB = np.array(BB)
     BW = np.array(BW)
-    BFineConns = np.array(BFineConns, dtype=np.int_)
     BCoarseConns = np.array(BCoarseConns, dtype=np.int_)
-    return BB, BW, BFineConns, BCoarseConns, polys, coarseToFineNodes
+    return BB, BW, BCoarseConns, polys, coarseToFineNodes
 
 
 @timeme
