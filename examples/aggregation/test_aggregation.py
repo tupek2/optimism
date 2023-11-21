@@ -136,7 +136,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
-        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polys \
+        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterp, polyShapeGrads, polyVols, polyConns, polyFineConns \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, coarseToFineNodes, self.mesh.coords, onp.eye(2))
@@ -157,7 +157,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polys \
+        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
         restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes, len(interp_c.activeNodalField))
@@ -214,13 +214,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyConnsCoarse, polys \
+        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
         restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes, len(interp_c.activeNodalField))
 
-        #sigma = np.array([[-0.5, 0.0], [0.0, 0.3]])
-        #traction_func = lambda x, n: np.dot(sigma, n)
         traction_func = lambda x, n: np.array([0.0, 0.06])
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
         
@@ -333,9 +331,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.check_valid_interpolation(interp_c)
 
         polys, coarseToFineNodes = PolyFunctionSpace.construct_unstructured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
-        polyShapeGrads, polyQuadVols, coarseConnectivities = PolyFunctionSpace.construct_structured_gradop(polys)
+        polyShapeGrads, polyQuadVols, polyConnectivities = PolyFunctionSpace.construct_structured_gradop(polys)
+        polyInterpolations, polyFineConnectivities = PolyFunctionSpace.construct_structured_elem_interpolations(polys)
 
-        return partitionElemField,interp_q,interp_c,coarseToFineNodes,polyShapeGrads,polyQuadVols,coarseConnectivities,polys
+        return partitionElemField,interp_q,interp_c,coarseToFineNodes,polyInterpolations,polyShapeGrads,polyQuadVols,polyConnectivities,polyFineConnectivities 
 
 
     def check_valid_interpolation(self, interpolation : Interpolation):

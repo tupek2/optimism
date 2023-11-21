@@ -11,7 +11,7 @@ from chex._src import pytypes
 class Polyhedral:
     fineNodes : pytypes.ArrayDevice
     coarseNodes: pytypes.ArrayDevice
-    localCoarseToFineNodes : pytypes.ArrayDevice
+    #localCoarseToFineNodes : pytypes.ArrayDevice
     fineElems : pytypes.ArrayDevice
 
     interpolation : pytypes.ArrayDevice
@@ -172,7 +172,7 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
             localCoarseIndex = fineToLocalCoarseIndex[fineNode]
             shapeGrad[:,:,localCoarseIndex] = B[:,:,n]
 
-        poly = Polyhedral(fineNodes=fineNodes, coarseNodes=coarseNodes, localCoarseToFineNodes=localCoarseToFineNodes,
+        poly = Polyhedral(fineNodes=fineNodes, coarseNodes=coarseNodes,
                           fineElems=polyE, interpolation=interpMatrix, shapeGrad=shapeGrad, weights=W)
         polys.append(poly)
 
@@ -188,7 +188,7 @@ def construct_structured_gradop(polys):
     # B stands for block?
     BB = onp.zeros((len(polys), maxQuads, 2, maxNodes))
     BW = onp.zeros((len(polys), maxQuads))
-    BCoarseConns = onp.zeros((len(polys), maxNodes), dtype=onp.int_)
+    BCoarseConns = onp.zeros((len(polys), maxNodes), dtype=int)
     for p,poly in enumerate(polys):
         B = poly.shapeGrad
         BB[p,:B.shape[0],:,:B.shape[2]] = B
@@ -196,11 +196,33 @@ def construct_structured_gradop(polys):
         BW[p,:W.shape[0]] = W
         polyCoarseNodes = poly.coarseNodes
         BCoarseConns[p,:polyCoarseNodes.shape[0]] = polyCoarseNodes
+        BCoarseConns[p,polyCoarseNodes.shape[0]:] = polyCoarseNodes[0]
 
     BB = np.array(BB)
     BW = np.array(BW)
-    BCoarseConns = np.array(BCoarseConns, dtype=np.int_)
+    BCoarseConns = np.array(BCoarseConns, dtype=int)
     return BB, BW, BCoarseConns
+
+
+@timeme
+def construct_structured_elem_interpolations(polys):
+    numFinePerPoly = [poly.interpolation.shape[0] for poly in polys]
+    numCoarsePerPoly = [poly.interpolation.shape[1] for poly in polys]
+    maxFine = onp.max(numFinePerPoly)
+    maxCoarse = onp.max(numCoarsePerPoly)
+
+    BInterp = onp.zeros((len(polys), maxFine, maxCoarse))
+    BFineNodes = onp.zeros((len(polys), maxFine), dtype=int)
+    for p,poly in enumerate(polys):
+        I = poly.interpolation
+        BInterp[p,:I.shape[0],:I.shape[1]] = I
+        fineNodes = poly.fineNodes
+        BFineNodes[p,:fineNodes.shape[0]] = fineNodes
+        BFineNodes[p,fineNodes.shape[0]:] = fineNodes[0]
+
+    BInterp = np.array(BInterp)
+    BFineNodes = np.array(BFineNodes, dtype=int)
+    return BInterp, BFineNodes
 
 
 @timeme
