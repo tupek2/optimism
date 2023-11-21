@@ -3,6 +3,9 @@ from collections import namedtuple
 import numpy as onp
 import jax
 import jax.numpy as np
+# data class
+from chex._src.dataclass import dataclass
+from chex._src import pytypes
 
 # testing stuff
 from optimism.test import MeshFixture
@@ -41,10 +44,10 @@ else:
 trSettings = EqSolver.get_settings(max_trust_iters=400, use_incremental_objective=False, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
 
 
+@dataclass(frozen=True, mappable_dataclass=True)
 class Interpolation:
-    def __init__(self, interp, field):
-        self.interpolation = interp
-        self.activeNodalField = field
+    interpolation : pytypes.ArrayDevice
+    activeNodalField : pytypes.ArrayDevice
 
 def quadrature_grad(field, shapeGrad, neighbors):
     return shapeGrad@field[neighbors]
@@ -179,13 +182,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         b = gradient(self.dispTarget)
 
         @jax.jit
-        def apply_restriction(restriction, load):
+        def apply_operator(restriction, load):
             return np.array([ r[1] @ load[r[0]] for r in restriction ])
         
-        b_c = apply_restriction(restriction, b)
+        b_c = apply_operator(restriction, b)
 
         U = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
-        U = apply_restriction(interp_c.interpolation, U)
+        U = apply_operator(interp_c.interpolation, U)
 
         # test we get exact solution
 
@@ -237,19 +240,17 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         b = gradient(self.dispTarget)
 
         @jax.jit
-        def apply_restriction(restriction, load):
+        def apply_sparse_operator(restriction, load):
             return np.array([r[1] @ load[r[0]] for r in restriction])
         
-        b_c = apply_restriction(restriction, b)
+        b_c = apply_sparse_operator(restriction, b)
 
         coarseStiffnesses = ()
         for p,poly in enumerate(poly):
             print(4)
 
-        #for neighbors,weights in interp_c
-
         U_c = self.solver_coarse(freeActiveNodes, polyShapeGrads, polyVols, polyConns, dofManager, b_c)
-        U_c = apply_restriction(interp_c.interpolation, U_c)
+        U_c = apply_sparse_operator(interp_c.interpolation, U_c)
 
         U_f = self.solver_fine(dofManager, b)
 
@@ -304,7 +305,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             rhsEnergy = 0.0
             if not rhs is None:
                 rhsEnergy = rhs.ravel()@U.ravel()
-            return  self.compute_energy(U, self.internals) + rhsEnergy
+            return self.compute_energy(U, self.internals) + rhsEnergy
 
         p = Objective.Params(0.0)
 
@@ -328,7 +329,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         nodesToBoundary_q = coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
         interpolation_q, activeNodalField_q = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False)
 
-        interp_q = Interpolation(interpolation_q, activeNodalField_q)
+        interp_q = Interpolation(interpolation=interpolation_q, activeNodalField=activeNodalField_q)
         self.check_valid_interpolation(interp_q)
 
         approximationBoundaries = geometricBoundaries.copy()
@@ -337,20 +338,16 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         nodesToBoundary_c = coarsening.create_nodes_to_boundaries(self.mesh, approximationBoundaries)
         interpolation_c, activeNodalField_c = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True)
 
-        interp_c = Interpolation(interpolation_c, activeNodalField_c)
+        interp_c = Interpolation(interpolation=interpolation_c, activeNodalField=activeNodalField_c)
         self.check_valid_interpolation(interp_c)
 
         # shape gradient, volume, connectivies
-        polyShapeGrads, polyQuadVols, globalConnectivities = PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
-
-        allActiveNodes = []
-        for n,isActive in enumerate(activeNodalField_c):
-            if isActive:
-                allActiveNodes.append(n)
+        polyShapeGrads, polyQuadVols, globalConnectivities, coarseConnectivities, polys, coarseToFineNodes = \
+          PolyFunctionSpace.construct_structured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
 
         dirichletActiveNodes = coarsening.create_nodes_to_boundaries_if_active(self.mesh, dirichletBoundaries, activeNodalField_c)
-        nonDirichletActiveNodes = [n for n in allActiveNodes if (n not in dirichletActiveNodes)]
-        assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(allActiveNodes))
+        nonDirichletActiveNodes = [n for n in coarseToFineNodes if (n not in dirichletActiveNodes)]
+        assert(len(dirichletActiveNodes) + len(nonDirichletActiveNodes) == len(coarseToFineNodes))
 
         return partitionElemField,interp_q,interp_c,np.array(nonDirichletActiveNodes,dtype=int),polyShapeGrads,polyQuadVols,globalConnectivities
 
