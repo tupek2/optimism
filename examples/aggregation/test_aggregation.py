@@ -259,6 +259,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Ubc = dofManager.get_bc_values(self.dispTarget)
         U = dofManager.create_field(UuGuess, Ubc)
 
+
         # some of the free active nodes have dirichlet in a direction, so should be removed from free unknowns list
         isCoarseUnknown = dofManager.isUnknown[coarseToFineNodes,:].ravel()
         coarseUnknownIndices = dofManager.dofToUnknown.reshape(dofManager.fieldShape)[coarseToFineNodes,:].ravel()
@@ -271,10 +272,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             UuParam = params[2]
             Uu = UuParam.at[coarseUnknownIndices].set(Uf)
             U = dofManager.create_field(Uu, Ubc)  # MRT, need to work on reducing the field sizes needed to be used in here
+            U_c = U[coarseToFineNodes]
             rhsEnergy = 0.0
             if not freeRhs is None:
-                rhsEnergy = freeRhs@Uf
-            return total_energy(U, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel) + rhsEnergy
+                rhsEnergy = rhs.ravel()@U_c.ravel()
+            return total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConnsCoarse, self.materialModel) + rhsEnergy
+        
+        U_c_guess = U[coarseToFineNodes]
 
         initialQuadratureState = self.materialModel.compute_initial_state()
         stateVars = np.tile(initialQuadratureState, (polyVols.shape[0], polyVols.shape[1], 1))
