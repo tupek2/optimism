@@ -83,6 +83,7 @@ def create_poly_elems(partitionField):
     polys = {}
     for e,p in enumerate(partitionField):
         set_value_insert(polys, p, int(e))
+    #polys = [list(polys[p]) for p in polys]
     return polys
 
 @timeme

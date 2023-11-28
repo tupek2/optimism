@@ -171,9 +171,9 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
         for n,fineNode in enumerate(globalConnectivities[polyI]):
             localCoarseIndex = fineToLocalCoarseIndex[fineNode]
             shapeGrad[:,:,localCoarseIndex] = B[:,:,n]
-
         poly = Polyhedral(fineNodes=fineNodes, coarseNodes=coarseNodes,
-                          fineElems=polyE, interpolation=interpMatrix, shapeGrad=shapeGrad, weights=W)
+                          fineElems=onp.array(list(polyElems[polyI])), interpolation=interpMatrix,
+                          shapeGrad=shapeGrad, weights=W)
         polys.append(poly)
 
     return polys, coarseToFineNodes
