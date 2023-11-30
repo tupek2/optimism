@@ -105,7 +105,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
     def setUp(self):
         #self.Nx = 7
         #self.Ny = 4
-        #self.numParts = 4
+        #self.numParts = 5
 
         self.Nx = 15
         self.Ny = 8
@@ -155,7 +155,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.assertNear(self.expectedVolume, onp.sum(polyVols), 8)
 
         # consider how to do initial guess. hard to be robust without warm start
-        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyInterps, polys, dofManager)
+        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager)
 
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, coarseToFineNodes, U, self.targetDispGrad)
 
@@ -194,7 +194,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         
         b_c = apply_operator(restriction, b)
 
-        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyInterps, polys, dofManager, b_c)
+        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
         U = apply_operator(interp_c.interpolation, U)
 
         # test we get exact solution
@@ -247,11 +247,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         
         b_c = apply_sparse_operator(restriction, b)
 
-        #coarseStiffnesses = ()
-        #for p,poly in enumerate(poly):
-        #    print(4)
-
-        U_c = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyInterps, polys, dofManager, b_c)
+        # poly fine conns go with the polyInterp, MRT, change fine conns to have varying size, they do not go into any jit directly
+        U_c = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
         U_c = apply_sparse_operator(interp_c.interpolation, U_c)
 
         U_f = self.solver_fine(dofManager, b)
@@ -261,7 +258,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('disp_coarse', U_c), ('disp', U_f), ('load', b), ('load_coarse', np.zeros_like(b).at[coarseToFineNodes].set(b_c))])
 
     @timeme
-    def solver_coarse(self, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyInterps, polys, dofManager, rhs=None):
+    def solver_coarse(self, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, rhs=None):
         UuGuess = dofManager.get_unknown_values(self.dispTarget)
         Ubc = dofManager.get_bc_values(self.dispTarget)
         U = dofManager.create_field(UuGuess, Ubc)
@@ -271,20 +268,58 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         stateVarsFine = np.tile(initialQuadratureState, (self.fs.vols.shape[0], self.fs.vols.shape[1], 1))
 
         def fine_poly_energy(polyDisp, U, stateVars, tetElemsInPoly, fineNodesInPoly):
-            U = U.at[fineNodesInPoly].set(polyDisp)
+            U = U.at[fineNodesInPoly[::-1]].set(polyDisp[::-1])  # reverse nodes so first node in conns list so first actual appearence of it is used in the index update
             shapeGrads = self.fs.shapeGrads[tetElemsInPoly]
             vols = self.fs.vols[tetElemsInPoly]
             conns = self.mesh.conns[tetElemsInPoly]
             stateVarsE = stateVars[tetElemsInPoly]
             energyDensities = jax.vmap(poly_subtet_energy, (None,0,0,0,0,None))(U, stateVarsE, shapeGrads, vols, conns, self.materialModel)
             return np.sum(energyDensities)
+        
+        def coarse_poly_energy(polyDisp, U, stateVars, p):
+            polyNodes = polyConns[p]
+            U = U.at[polyNodes[::-1]].set(polyDisp[::-1])
+            return poly_energy(U, stateVars[p], polyShapeGrads[p], polyVols[p], polyNodes, self.materialModel)
 
+        U_c = U[coarseToFineNodes]
+        coords_c = self.mesh.coords[coarseToFineNodes]
         # compute fine stiffness up front
+        stiffnessCorrections = []
         for p,poly in enumerate(polys):
             poly : PolyFunctionSpace.Polyhedral
-            polyDisp = U[poly.fineNodes]
-            compute_stiffness = jax.hessian(fine_poly_energy, argnums=0)(polyDisp, U, stateVarsFine, poly.fineElems, poly.fineNodes)
-            
+            fineNodes = polyFineConns[p]
+            finePolyDisp = U[fineNodes]
+            fineStiffness = jax.hessian(fine_poly_energy, argnums=0)(finePolyDisp, U, stateVarsFine, poly.fineElems, fineNodes)
+
+            interp = polyInterps[p]
+            PKP = np.einsum(interp, [0,1], fineStiffness, [0,2,3,4], interp, [3,5], [1,2,5,4])
+
+            coarseNodes = polyConns[p]
+            #polyCoordsCoarse = coords_c[coarseNodes]
+            #polyCoordsProlong = interp @ polyCoordsCoarse
+            #polyCoordsProlong2 = self.mesh.coords[fineNodes]
+
+            coarsePolyDisp = U_c[coarseNodes]
+            coarseStiffness = jax.hessian(coarse_poly_energy, argnums=0)(coarsePolyDisp, U_c, stateVars, p)
+
+            #print('fine nodes = ', fineNodes)
+            #print('fine stiff = ', fineStiffness)
+
+            #print('coarse nodes = ', coarseNodes)
+            #print('coarse stiff = ', coarseStiffness)
+
+            #print('energy compares = ',
+            #      np.einsum(polyCoordsCoarse, [0,1], PKP, [0,1,2,3], polyCoordsCoarse, [2,3], []),
+            #      np.einsum(polyCoordsProlong, [0,1], fineStiffness, [0,1,2,3], polyCoordsProlong, [2,3], []),
+            #      np.einsum(polyCoordsProlong2, [0,1], fineStiffness, [0,1,2,3], polyCoordsProlong2, [2,3], []),
+            #      np.einsum(polyCoordsCoarse, [0,1], coarseStiffness, [0,1,2,3], polyCoordsCoarse, [2,3], []))
+            stiffnessCorrections.append(PKP-coarseStiffness)
+
+        stiffnessCorrections = np.array(stiffnessCorrections)
+
+        def correction_energy(U_c, polyNodes, polyStiffness):
+            Up = U_c[polyNodes]
+            return np.einsum(Up, [0,1], polyStiffness, [0,1,2,3], Up, [2,3], [])
 
         isCoarseUnknown = dofManager.isUnknown[coarseToFineNodes,:]
 
@@ -295,7 +330,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             rhsEnergy = 0.0
             if not rhs is None:
                 rhsEnergy = rhs.ravel()@U_c.ravel()
-            return total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel) + rhsEnergy
+
+            coarseEnergy = total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
+            #correctionEnergy = 0.0
+            correctionEnergy = 0.5 * np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
+
+            return coarseEnergy + correctionEnergy + rhsEnergy
         
         U_c = U[coarseToFineNodes]
         Uu_c = 0.9 * U_c[isCoarseUnknown]
