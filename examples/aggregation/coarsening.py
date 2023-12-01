@@ -200,7 +200,9 @@ def rkpm(neighbors, coords, evalCoord, length):
     dim = 2
     # setup moment matrix in 2D
     def comp_h(I):
-        return np.array([1.0, (evalCoord[0]-coords[I,0])/length, (evalCoord[1]-coords[I,1])/length])
+        dx = (evalCoord[0]-coords[I,0]) / length
+        dy = (evalCoord[1]-coords[I,1]) / length
+        return np.array([1.0, dx, dy, dx*dx, dy*dy, dx*dy])
 
     def comp_m(I):
         H = comp_h(I)
@@ -210,13 +212,14 @@ def rkpm(neighbors, coords, evalCoord, length):
         return comp_h(I)@b
 
     M = np.sum( jax.vmap(comp_m)(neighbors), axis=0 )
-    M += 1e-10 * np.eye(dim+1)
+    M += 1e-10 * np.eye(dim+1+3)
     #if np.isnan(np.sum(np.sum(M))):
     #    print('nan M = ', M)
-    H0 = np.array([1.0,0.0,0.0])
+    H0 = np.array([1.0,0.0,0.0,0.0,0.0,0.0])
     b = np.linalg.solve(M, H0)
     b += np.linalg.solve(M, H0 - M@b)
     b += np.linalg.solve(M, H0 - M@b)
+
     #if np.isnan(np.sum(b)):
     #    print('nan b, h = ', b, H0, length)
 

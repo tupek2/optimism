@@ -31,7 +31,6 @@ from optimism import Mechanics
 import optimism.Objective as Objective
 import optimism.EquationSolver as EqSolver
 
-
 # hint: _q means shape functions associated with quadrature rule (on coarse mesh)
 # hint: _c means shape functions associated with coarse degrees of freedom
 
@@ -133,6 +132,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.compute_energy = mcxFuncs.compute_strain_energy
         self.internals = mcxFuncs.compute_initial_state()
 
+        onp.random.seed(5)
+        self.randField = onp.random.rand(self.mesh.coords.shape[0], self.mesh.coords.shape[1])
+
 
     def untest_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
@@ -219,10 +221,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 FunctionSpace.EssentialBC(nodeSet='left', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        #ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
-        #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
-        #dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
-        
         partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'])
         
@@ -247,9 +245,25 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         
         b_c = apply_sparse_operator(restriction, b)
 
-        # poly fine conns go with the polyInterp, MRT, change fine conns to have varying size, they do not go into any jit directly
+        # poly fine conns go with the polyInterp, MRT, change fine conns to allow varying size, they do not go into any jit directly
         U_c = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
-        U_c = apply_sparse_operator(interp_c.interpolation, U_c)
+        U_c = apply_sparse_operator(interp_c.interpolation, U_c) # this changes size of U_c to be all the fine dofs as well
+
+        self.field_f = apply_sparse_operator(interp_c.interpolation, self.randField) #self.field_c)
+
+        self.field_f2 = 0.0*self.field_f
+        for p,interp in enumerate(polyInterps):
+            fineNodes = polyFineConns[p]
+            coarseNodes = polyConns[p]
+            self.field_f2 = self.field_f2.at[fineNodes[::-1]].set((interp@self.field_c[coarseNodes])[::-1] )
+            #self.field_f2 = self.field_f2.at[fineNodes].set((interp@self.field_c[coarseNodes]))
+
+        print('field vals 1 ', self.field_f)
+        print('field vals 2 ', self.field_f2)
+
+        #self.field_f = self.field_f2
+
+        print('norm diff interpolated fields = ', onp.linalg.norm(self.field_f2 - self.field_f))
 
         U_f = self.solver_fine(dofManager, b)
 
@@ -265,7 +279,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         initialQuadratureState = self.materialModel.compute_initial_state()
         stateVars = np.tile(initialQuadratureState, (polyVols.shape[0], polyVols.shape[1], 1))
-        stateVarsFine = np.tile(initialQuadratureState, (self.fs.vols.shape[0], self.fs.vols.shape[1], 1))
+        stateVarsFine = self.internals
 
         def fine_poly_energy(polyDisp, U, stateVars, tetElemsInPoly, fineNodesInPoly):
             U = U.at[fineNodesInPoly[::-1]].set(polyDisp[::-1])  # reverse nodes so first node in conns list so first actual appearence of it is used in the index update
@@ -282,7 +296,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             return poly_energy(U, stateVars[p], polyShapeGrads[p], polyVols[p], polyNodes, self.materialModel)
 
         U_c = U[coarseToFineNodes]
-        coords_c = self.mesh.coords[coarseToFineNodes]
+        
         # compute fine stiffness up front
         stiffnessCorrections = []
         for p,poly in enumerate(polys):
@@ -295,52 +309,47 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             PKP = np.einsum(interp, [0,1], fineStiffness, [0,2,3,4], interp, [3,5], [1,2,5,4])
 
             coarseNodes = polyConns[p]
-            #polyCoordsCoarse = coords_c[coarseNodes]
-            #polyCoordsProlong = interp @ polyCoordsCoarse
-            #polyCoordsProlong2 = self.mesh.coords[fineNodes]
 
             coarsePolyDisp = U_c[coarseNodes]
             coarseStiffness = jax.hessian(coarse_poly_energy, argnums=0)(coarsePolyDisp, U_c, stateVars, p)
 
-            #print('fine nodes = ', fineNodes)
-            #print('fine stiff = ', fineStiffness)
-
-            #print('coarse nodes = ', coarseNodes)
-            #print('coarse stiff = ', coarseStiffness)
-
-            #print('energy compares = ',
-            #      np.einsum(polyCoordsCoarse, [0,1], PKP, [0,1,2,3], polyCoordsCoarse, [2,3], []),
-            #      np.einsum(polyCoordsProlong, [0,1], fineStiffness, [0,1,2,3], polyCoordsProlong, [2,3], []),
-            #      np.einsum(polyCoordsProlong2, [0,1], fineStiffness, [0,1,2,3], polyCoordsProlong2, [2,3], []),
-            #      np.einsum(polyCoordsCoarse, [0,1], coarseStiffness, [0,1,2,3], polyCoordsCoarse, [2,3], []))
-            stiffnessCorrections.append(PKP-coarseStiffness)
+            stiffnessCorrections.append(PKP) #-coarseStiffness)
 
         stiffnessCorrections = np.array(stiffnessCorrections)
 
         def correction_energy(U_c, polyNodes, polyStiffness):
             Up = U_c[polyNodes]
-            return np.einsum(Up, [0,1], polyStiffness, [0,1,2,3], Up, [2,3], [])
+            return 0.5 * np.einsum(Up, [0,1], polyStiffness, [0,1,2,3], Up, [2,3], [])
 
-        isCoarseUnknown = dofManager.isUnknown[coarseToFineNodes,:]
-
-        def energy(Uu_c, params): # MRT, how to pass arguments in here that are not for jit?
-            stateVars = params[1]
-            U_c = params[2]
-            U_c = U_c.at[isCoarseUnknown].set(Uu_c)
+        def energy_of_coarse_dofs(U_c, stateVars):
             rhsEnergy = 0.0
             if not rhs is None:
                 rhsEnergy = rhs.ravel()@U_c.ravel()
 
-            coarseEnergy = total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
-            #correctionEnergy = 0.0
-            correctionEnergy = 0.5 * np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
-
+            coarseEnergy = 0.0 * total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
+            correctionEnergy = np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
             return coarseEnergy + correctionEnergy + rhsEnergy
+
+        isCoarseUnknown = dofManager.isUnknown[coarseToFineNodes,:]
+
+        def energy(Uu_c, params): # MRT, how to pass arguments in here that are not for jit?
+            U_c = params[2]
+            U_c = U_c.at[isCoarseUnknown].set(Uu_c)
+            stateVars = params[1]
+            return energy_of_coarse_dofs(U_c, stateVars)
         
         U_c = U[coarseToFineNodes]
+
+        self.field_c = self.randField[coarseToFineNodes]
+        hess = jax.hessian(energy_of_coarse_dofs, argnums=0)(0.0*U_c, stateVars)
+        force = jax.grad(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
+
+        x = self.field_c
+        coarseEnergy = 0.5 * np.einsum(x, [0,1], hess, [0,1,2,3], x, [2,3], [])
+        #coarseEnergy += np.einsum(force, [0,1], x, [0,1], [])
+        print('coarse energy = ', coarseEnergy)
+
         Uu_c = 0.9 * U_c[isCoarseUnknown]
-
-
         p = Objective.Params(0.0, stateVars, U_c)
 
         objective = Objective.Objective(energy, 0.0*Uu_c, p, None) # linearize about... for preconditioner, warm start
@@ -348,7 +357,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         U_c = U_c.at[isCoarseUnknown].set(Uu_c)
         U = U.at[coarseToFineNodes].set(U_c)
-        return U
+        return U # MRT, return U_c and fix the restriction/interpolation to use to coarse dofs
 
     @timeme
     def solver_fine(self, dofManager, rhs=None):
@@ -356,15 +365,25 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Ubc = dofManager.get_bc_values(self.dispTarget)
         U = dofManager.create_field(UuGuess, Ubc)
 
-        def energy(Uu, params):
-            U = dofManager.create_field(Uu, Ubc)
+        def energy_of_fine_dofs(U, stateVars):
             rhsEnergy = 0.0
             if not rhs is None:
                 rhsEnergy = rhs.ravel()@U.ravel()
-            return self.compute_energy(U, self.internals) + rhsEnergy
+            return self.compute_energy(U, stateVars) + rhsEnergy
 
-        p = Objective.Params(0.0)
+        def energy(Uu, params):
+            U = dofManager.create_field(Uu, Ubc)
+            return energy_of_fine_dofs(U, params[1])
 
+        hess = jax.hessian(energy_of_fine_dofs, argnums=0)(0.0*U, self.internals)
+        force = jax.grad(energy_of_fine_dofs, argnums=0)(U, self.internals)
+
+        x = self.field_f
+        fineEnergy = 0.5 * np.einsum(x, [0,1], hess, [0,1,2,3], x, [2,3], [])
+        #fineEnergy += np.einsum(force, [0,1], x, [0,1], [])
+        print('fine energy = ', fineEnergy)
+
+        p = Objective.Params(0.0, self.internals)
         objective = Objective.Objective(energy, UuGuess, p, None)
         Uu = EqSolver.nonlinear_equation_solve(objective, UuGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
