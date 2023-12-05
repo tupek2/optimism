@@ -102,13 +102,13 @@ def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=Non
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        #self.Nx = 7
-        #self.Ny = 4
-        #self.numParts = 5
+        self.Nx = 7
+        self.Ny = 4
+        self.numParts = 5
 
-        self.Nx = 15
-        self.Ny = 8
-        self.numParts = 10
+        #self.Nx = 15
+        #self.Ny = 8
+        #self.numParts = 10
 
         xRange = [0.,5.]
         yRange = [0.,1.2]
@@ -256,14 +256,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             fineNodes = polyFineConns[p]
             coarseNodes = polyConns[p]
             self.field_f2 = self.field_f2.at[fineNodes[::-1]].set((interp@self.field_c[coarseNodes])[::-1] )
-            #self.field_f2 = self.field_f2.at[fineNodes].set((interp@self.field_c[coarseNodes]))
-
-        print('field vals 1 ', self.field_f)
-        print('field vals 2 ', self.field_f2)
-
-        #self.field_f = self.field_f2
-
-        print('norm diff interpolated fields = ', onp.linalg.norm(self.field_f2 - self.field_f))
 
         U_f = self.solver_fine(dofManager, b)
 
@@ -341,18 +333,18 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         U_c = U[coarseToFineNodes]
 
         self.field_c = self.randField[coarseToFineNodes]
-        hess = jax.hessian(energy_of_coarse_dofs, argnums=0)(0.0*U_c, stateVars)
+        hess = jax.hessian(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
         force = jax.grad(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
 
         x = self.field_c
         coarseEnergy = 0.5 * np.einsum(x, [0,1], hess, [0,1,2,3], x, [2,3], [])
-        #coarseEnergy += np.einsum(force, [0,1], x, [0,1], [])
-        print('coarse energy = ', coarseEnergy)
+
+        print('coarse energy = ', coarseEnergy + np.einsum(x, [0,1], force, [0,1], []))
 
         Uu_c = 0.9 * U_c[isCoarseUnknown]
         p = Objective.Params(0.0, stateVars, U_c)
 
-        objective = Objective.Objective(energy, 0.0*Uu_c, p, None) # linearize about... for preconditioner, warm start
+        objective = Objective.Objective(energy, Uu_c, p, None) # linearize about... for preconditioner, warm start
         Uu_c = EqSolver.nonlinear_equation_solve(objective, Uu_c, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
         U_c = U_c.at[isCoarseUnknown].set(Uu_c)
@@ -375,13 +367,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             U = dofManager.create_field(Uu, Ubc)
             return energy_of_fine_dofs(U, params[1])
 
-        hess = jax.hessian(energy_of_fine_dofs, argnums=0)(0.0*U, self.internals)
+        hess = jax.hessian(energy_of_fine_dofs, argnums=0)(U, self.internals)
         force = jax.grad(energy_of_fine_dofs, argnums=0)(U, self.internals)
 
         x = self.field_f
         fineEnergy = 0.5 * np.einsum(x, [0,1], hess, [0,1,2,3], x, [2,3], [])
-        #fineEnergy += np.einsum(force, [0,1], x, [0,1], [])
-        print('fine energy = ', fineEnergy)
+        print('fine energy = ', fineEnergy + np.einsum(x, [0,1], force, [0,1], []))
 
         p = Objective.Params(0.0, self.internals)
         objective = Objective.Objective(energy, UuGuess, p, None)

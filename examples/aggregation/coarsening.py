@@ -196,13 +196,19 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes, req
 
 
 #@jax.jit
-def rkpm(neighbors, coords, evalCoord, length):
+def rkpm(neighbors, coords, evalCoord, length, order=1):
     dim = 2
+
+    assert(order==1 or order==2)
+
+    numBases = dim+1
+    if order==2: numBases += 3
+
     # setup moment matrix in 2D
     def comp_h(I):
         dx = (evalCoord[0]-coords[I,0]) / length
         dy = (evalCoord[1]-coords[I,1]) / length
-        return np.array([1.0, dx, dy, dx*dx, dy*dy, dx*dy])
+        return np.array([1.0, dx, dy]) if order==1 else np.array([1.0, dx, dy, dx*dx, dy*dy, dx*dy])
 
     def comp_m(I):
         H = comp_h(I)
@@ -212,10 +218,12 @@ def rkpm(neighbors, coords, evalCoord, length):
         return comp_h(I)@b
 
     M = np.sum( jax.vmap(comp_m)(neighbors), axis=0 )
-    M += 1e-10 * np.eye(dim+1+3)
+    M = M + 1e-10 * np.eye(numBases)
     #if np.isnan(np.sum(np.sum(M))):
     #    print('nan M = ', M)
-    H0 = np.array([1.0,0.0,0.0,0.0,0.0,0.0])
+    #H0 = np.array([1.0,0.0,0.0,0.0,0.0,0.0])
+    H0 = np.zeros(numBases)
+    H0 = H0.at[0].set(1.0)
     b = np.linalg.solve(M, H0)
     b += np.linalg.solve(M, H0 - M@b)
     b += np.linalg.solve(M, H0 - M@b)
