@@ -263,6 +263,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
                      [('disp_coarse', U_c), ('disp', U_f), ('load', b), ('load_coarse', np.zeros_like(b).at[coarseToFineNodes].set(b_c))])
 
+
     @timeme
     def solver_coarse(self, coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, rhs=None):
         UuGuess = dofManager.get_unknown_values(self.dispTarget)
@@ -305,7 +306,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             coarsePolyDisp = U_c[coarseNodes]
             coarseStiffness = jax.hessian(coarse_poly_energy, argnums=0)(coarsePolyDisp, U_c, stateVars, p)
 
-            stiffnessCorrections.append(PKP) #-coarseStiffness)
+            stiffnessCorrections.append(PKP-coarseStiffness)
 
         stiffnessCorrections = np.array(stiffnessCorrections)
 
@@ -318,7 +319,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             if not rhs is None:
                 rhsEnergy = rhs.ravel()@U_c.ravel()
 
-            coarseEnergy = 0.0 * total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
+            coarseEnergy = total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
             correctionEnergy = np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
             return coarseEnergy + correctionEnergy + rhsEnergy
 
