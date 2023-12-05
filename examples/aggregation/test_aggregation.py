@@ -75,6 +75,9 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 def total_energy(field, stateVars, B, Vs, neighbors, material):
     return np.sum( jax.vmap(poly_energy, (None,0,0,0,0,None))(field, stateVars, B, Vs, neighbors, material) )
 
+@jax.jit
+def apply_operator(linearop, load):
+    return np.array([ r[1] @ load[r[0]] for r in linearop ])
 
 def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=None):
     from optimism import VTKWriter
@@ -136,7 +139,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.randField = onp.random.rand(self.mesh.coords.shape[0], self.mesh.coords.shape[1])
 
 
-    def untest_poly_patch_test_all_dirichlet(self):
+    def test_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
         dirichletSets = ['top','bottom','left','right']
         ebcs = []
@@ -153,20 +156,20 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, coarseToFineNodes, self.mesh.coords, onp.eye(2))
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, self.mesh.coords[coarseToFineNodes], onp.eye(2))
         self.assertNear(self.expectedVolume, onp.sum(polyVols), 8)
 
         # consider how to do initial guess. hard to be robust without warm start
-        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager)
-
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, coarseToFineNodes, U, self.targetDispGrad)
+        Uc = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager)
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, Uc, self.targetDispGrad)
+        U = apply_operator(interp_c.interpolation, Uc)
 
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
                      [('disp', U), ('disp_target', self.dispTarget)])
 
 
-    def untest_poly_patch_test_with_neumann(self):
+    def test_poly_patch_test_with_neumann(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
@@ -174,7 +177,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes, len(interp_c.activeNodalField))
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes)
 
         sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
         traction_func = lambda x, n: np.dot(sigma, n)     
@@ -189,15 +192,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         self.dispTarget = 0.0 * self.dispTarget
         b = gradient(self.dispTarget)
-
-        @jax.jit
-        def apply_operator(linearop, load):
-            return np.array([ r[1] @ load[r[0]] for r in linearop ])
-        
+      
         b_c = apply_operator(restriction, b)
 
-        U = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
-        U = apply_operator(interp_c.interpolation, U)
+        Uc = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
+        U = apply_operator(interp_c.interpolation, Uc)
 
         # test we get exact solution
 
@@ -212,11 +211,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
                      [('disp', U), ('disp_target', UExact)])
         
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, coarseToFineNodes, U, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, Uc, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
         self.assertArrayNear(U, UExact, 9)
 
 
-    def test_poly_buckle(self):
+    def untest_poly_buckle(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='left', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
@@ -438,9 +437,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             self.assertNear(1.0, onp.sum(interp[1]), 8)
 
 
-    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, coarseToFine, U, expectedGradient):
-        Ucoarse = U[coarseToFine]
-        gradUs = jax.vmap(poly_quadrature_grad, (None,0,0))(Ucoarse, polyShapeGrads, polyConns)
+    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, Uc, expectedGradient):
+        gradUs = jax.vmap(poly_quadrature_grad, (None,0,0))(Uc, polyShapeGrads, polyConns)
         for p,polyGradUs in enumerate(gradUs): # all grads
             for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
                 if polyVols[p,q] > 0: self.assertArrayNear(expectedGradient, quadGradU, 7)

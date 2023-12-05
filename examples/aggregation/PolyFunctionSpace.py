@@ -240,7 +240,7 @@ def construct_coarse_restriction(interpolation, coarseToFineNodes):
 
         for n,node in enumerate(neighbors):
             node = node
-            coarseNodeId = node #fineToCoarseField[node]
+            coarseNodeId = node
             if coarseNodeId >= 0:
                 if restriction[coarseNodeId]:
                     restriction[coarseNodeId][0].append(mynode)
