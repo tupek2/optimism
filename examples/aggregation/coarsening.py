@@ -239,10 +239,8 @@ def rkpm(neighbors, coords, evalCoord, length, order=1):
 
 
 
-
-
 @timeme
-def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords, requireLinearComplete):
+def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords, requireLinearComplete, numInteriorNodesToAdd=0):
     
     activeNodes = onp.zeros_like(coords)[:,0]
     activate_nodes(nodesToColors, nodesToBoundary, activeNodes)

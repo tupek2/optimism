@@ -176,7 +176,7 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
                           shapeGrad=shapeGrad, weights=W)
         polys.append(poly)
 
-    return polys, coarseToFineNodes
+    return polys, coarseToFineNodes, fineToCoarseNodes
 
 @timeme
 def construct_structured_gradop(polys):
@@ -226,11 +226,9 @@ def construct_structured_elem_interpolations(polys):
 
 
 @timeme
-def construct_coarse_restriction(interpolation, coarseToFineNodes, numFineNodes):
-    fineToCoarseField = -np.ones(numFineNodes, dtype=int)
+def construct_coarse_restriction(interpolation, coarseToFineNodes):
 
     numCoarseNodes = len(coarseToFineNodes)
-    fineToCoarseField = fineToCoarseField.at[coarseToFineNodes].set(np.arange(numCoarseNodes, dtype=int))
 
     restriction = [list() for n in range(numCoarseNodes)]
 
@@ -242,7 +240,7 @@ def construct_coarse_restriction(interpolation, coarseToFineNodes, numFineNodes)
 
         for n,node in enumerate(neighbors):
             node = node
-            coarseNodeId = fineToCoarseField[node]
+            coarseNodeId = node #fineToCoarseField[node]
             if coarseNodeId >= 0:
                 if restriction[coarseNodeId]:
                     restriction[coarseNodeId][0].append(mynode)

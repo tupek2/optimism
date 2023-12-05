@@ -224,7 +224,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'])
         
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes, len(interp_c.activeNodalField))
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes)
 
         traction_func = lambda x, n: np.array([0.0, 0.06])
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
@@ -247,9 +247,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         # poly fine conns go with the polyInterp, MRT, change fine conns to allow varying size, they do not go into any jit directly
         U_c = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
-        U_c = apply_sparse_operator(interp_c.interpolation, U_c) # this changes size of U_c to be all the fine dofs as well
+        U_c = apply_sparse_operator(interp_c.interpolation, U_c) # U_c above comes out as size of full field
 
-        self.field_f = apply_sparse_operator(interp_c.interpolation, self.randField) #self.field_c)
+        self.field_f = apply_sparse_operator(interp_c.interpolation, self.field_c)
 
         self.field_f2 = 0.0*self.field_f
         for p,interp in enumerate(polyInterps):
@@ -349,8 +349,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Uu_c = EqSolver.nonlinear_equation_solve(objective, Uu_c, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
         U_c = U_c.at[isCoarseUnknown].set(Uu_c)
-        U = U.at[coarseToFineNodes].set(U_c)
-        return U # MRT, return U_c and fix the restriction/interpolation to use to coarse dofs
+        return U_c
 
     @timeme
     def solver_fine(self, dofManager, rhs=None):
@@ -407,7 +406,21 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         interp_c = Interpolation(interpolation=interpolation_c, activeNodalField=activeNodalField_c)
 
-        polys, coarseToFineNodes = PolyFunctionSpace.construct_unstructured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
+        polys, coarseToFineNodes, fineToCoarseNodes = PolyFunctionSpace.construct_unstructured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
+
+        def change_interp_to_use_coarse_nodes(interp_ : Interpolation):
+          interpolationToChange = interp_.interpolation
+          for i,interp in enumerate(interpolationToChange):
+              interp = list(interp)
+              neighborsInFine = interp[0]
+              neighborsInCoarse = fineToCoarseNodes[neighborsInFine]
+              interp[0] = neighborsInCoarse # MRT, just changed this
+              interpolationToChange[i] = interp
+          return Interpolation(interpolation=interpolationToChange, activeNodalField=interp_.activeNodalField)
+
+        interp_q = change_interp_to_use_coarse_nodes(interp_q)
+        interp_c = change_interp_to_use_coarse_nodes(interp_c)
+
         polyShapeGrads, polyQuadVols, polyConnectivities = PolyFunctionSpace.construct_structured_gradop(polys)
         polyInterpolations, polyFineConnectivities = PolyFunctionSpace.construct_structured_elem_interpolations(polys)
 
