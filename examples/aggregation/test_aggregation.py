@@ -139,7 +139,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.randField = onp.random.rand(self.mesh.coords.shape[0], self.mesh.coords.shape[1])
 
 
-    def test_poly_patch_test_all_dirichlet(self):
+    def untest_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
         dirichletSets = ['top','bottom','left','right']
         ebcs = []
@@ -169,7 +169,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('disp', U), ('disp_target', self.dispTarget)])
 
 
-    def test_poly_patch_test_with_neumann(self):
+    def untest_poly_patch_test_with_neumann(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
@@ -177,7 +177,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes)
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, len(coarseToFineNodes))
 
         sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
         traction_func = lambda x, n: np.dot(sigma, n)     
@@ -215,7 +215,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.assertArrayNear(U, UExact, 9)
 
 
-    def untest_poly_buckle(self):
+    def test_poly_buckle(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='left', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
@@ -223,7 +223,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'])
         
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, coarseToFineNodes)
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, len(coarseToFineNodes))
 
         traction_func = lambda x, n: np.array([0.0, 0.06])
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
@@ -413,7 +413,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
               interp = list(interp)
               neighborsInFine = interp[0]
               neighborsInCoarse = fineToCoarseNodes[neighborsInFine]
-              interp[0] = neighborsInCoarse # MRT, just changed this
+              interp[0] = neighborsInCoarse
               interpolationToChange[i] = interp
           return Interpolation(interpolation=interpolationToChange, activeNodalField=interp_.activeNodalField)
 

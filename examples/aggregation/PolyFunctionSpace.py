@@ -226,9 +226,7 @@ def construct_structured_elem_interpolations(polys):
 
 
 @timeme
-def construct_coarse_restriction(interpolation, coarseToFineNodes):
-
-    numCoarseNodes = len(coarseToFineNodes)
+def construct_coarse_restriction(interpolation, numCoarseNodes):
 
     restriction = [list() for n in range(numCoarseNodes)]
 
