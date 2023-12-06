@@ -392,7 +392,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
         nodesToBoundary_q = coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
-        interpolation_q, activeNodalField_q = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False)
+        interpolation_q, activeNodalField_q = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False, numInteriorNodesToAdd=3)
 
         interp_q = Interpolation(interpolation=interpolation_q, activeNodalField=activeNodalField_q)
         self.check_valid_interpolation(interp_q)
@@ -401,7 +401,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         for b in dirichletBoundaries: approximationBoundaries.append(b)
         # Here we seem to need info on which nodes are part of Dirichlet ones
         nodesToBoundary_c = coarsening.create_nodes_to_boundaries(self.mesh, approximationBoundaries)
-        interpolation_c, activeNodalField_c = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True)
+        interpolation_c, activeNodalField_c = coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True, numInteriorNodesToAdd=3)
 
         interp_c = Interpolation(interpolation=interpolation_c, activeNodalField=activeNodalField_c)
 

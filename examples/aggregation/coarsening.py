@@ -146,6 +146,12 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes, req
     edge1 = coords[active[1]] - coords[active[0]]
     edge1dotedge1 = onp.dot(edge1, edge1)
     lengthScale = onp.sqrt(edge1dotedge1)
+
+    for i in range(1,len(active)-1):
+        edge1 = coords[active[i+1]] - coords[active[i]]
+        edge1dotedge1 = onp.dot(edge1, edge1)
+        lengthScale = onp.maximum(lengthScale, onp.sqrt(edge1dotedge1))
+        
     tol = basetol * lengthScale
 
     if not requireLinearComplete:
@@ -238,6 +244,14 @@ def rkpm(neighbors, coords, evalCoord, length, order=1):
     return pouWeights
 
 
+def compute_poly_center_and_length(polyNodes, coords):
+    x = coords[polyNodes]
+    xc = onp.average(x, axis=0)
+    dx = x-xc
+
+    dx2 = [ddx@ddx for ddx in dx]
+
+    return xc, onp.sqrt( onp.max(dx2) )
 
 @timeme
 def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords, requireLinearComplete, numInteriorNodesToAdd=0):
@@ -247,19 +261,32 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
 
     interpolation = [() for n in range(len(activeNodes))]
         
+    extendedCoords = list(coords)
+
     for p in polyNodes:
         nodesOfPoly = polyNodes[p]
+
         polyFaces, polyExterior, polyInterior = divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly)
+        polyCenter, polyLength = compute_poly_center_and_length(polyNodes, coords)
+
+        # add bubble nodes to fine mesh
+        assert(numInteriorNodesToAdd==3 or numInteriorNodesToAdd==0)
+        if numInteriorNodesToAdd==3:
+          extendedCoords.append(polyCenter - polyLength * onp.array([0.5, 0.5]))
+          extendedCoords.append(polyCenter + polyLength * onp.array([0.5, 0.0]))
+          extendedCoords.append(polyCenter + polyLength * onp.array([0.0, 0.5]))
 
         maxLength = 0.0
         for f in polyFaces:
             # warning, this next function modifies activeNodes
             active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes, requireLinearComplete)
             maxLength = onp.maximum(maxLength, lengthScale)
+            for n in range(numInteriorNodesToAdd):
+              active.append(extendedCoords.shape[0]-numInteriorNodesToAdd+n)
             active = np.array(active, dtype=int)
             for iNode in inactive:
                 if lengthScale==0.0: lengthScale = 1.0
-                weights = rkpm(active, coords, coords[iNode], lengthScale)
+                weights = rkpm(active, extendedCoords, coords[iNode], lengthScale)
                 interpolation[iNode] = (active, weights)
 
         if (maxLength==0.0):
@@ -269,6 +296,8 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
         for n in polyExterior:
             if activeNodes[n]:
                 polyActiveExterior.append(n)
+        for n in range(numInteriorNodesToAdd):
+            polyActiveExterior.append(extendedCoords.shape[0]-numInteriorNodesToAdd+n)
         polyActiveExterior = np.array(polyActiveExterior, dtype=int)
 
         for iNode in polyInterior:
