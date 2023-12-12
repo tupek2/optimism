@@ -4,7 +4,7 @@ import jax
 import jax.numpy as np
 from optimism import Mesh
 from optimism.Timer import timeme
-
+from functools import partial
 
 def set_value_insert(themap, key, value):
     key = int(key)
@@ -201,7 +201,7 @@ def determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes, req
     return active, inactive, lengthScale
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(4,))
 def rkpm(neighbors, coords, evalCoord, length, order=1):
     dim = 2
 
@@ -261,16 +261,23 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
     activate_nodes(nodesToColors, nodesToBoundary, activeNodes)
 
     interpolation = [[] for n in range(len(activeNodes))]
-    extendedCoords = [c for c in coords]
+
+    bubbleNodeCoords = []
 
     polyExteriors = []
     polyInteriors = []
+    polyCenters = []
+    polyLengths = []
 
     for p in polyNodes:
         nodesOfPoly = polyNodes[p]
         polyFaces, polyExterior, polyInterior = divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly)
         polyExteriors.append(polyExterior)
         polyInteriors.append(polyInterior)
+
+        polyCenter, polyLength = compute_poly_center_and_length(nodesOfPoly, coords)
+        polyCenters.append(polyCenter)
+        polyLengths.append(polyLength)
 
         for f in polyFaces:
             # warning, this next function modifies activeNodes
@@ -281,49 +288,62 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
                 weights = rkpm(active, coords, coords[iNode], lengthScale)
                 interpolation[iNode] = [active, weights]
 
+        # add bubble nodes to fine mesh
+        assert(numInteriorNodesToAdd==3 or numInteriorNodesToAdd==0)
+        if numInteriorNodesToAdd==3:
+            bubbleNodeCoords.append( np.array([ polyCenter - polyLength * onp.array([0.5, 0.5]),
+                                                polyCenter + polyLength * onp.array([0.5, 0.0]),
+                                                polyCenter + polyLength * onp.array([0.0, 0.5])]) )
+
     coarseToFineNodes = onp.array([n for n,x in enumerate(activeNodes) if x], dtype=int)
     fineToCoarseNodes = -onp.ones_like(activeNodes, dtype=int)
     fineToCoarseNodes[coarseToFineNodes] = onp.arange(coarseToFineNodes.shape[0])
 
     coords_c = coords[coarseToFineNodes]
+    initialCoordsArrayOffset = coords_c.shape[0]
+
+    coords_c = [c for c in coords_c]
+    for polyCoords in bubbleNodeCoords:
+        for c in polyCoords:
+            coords_c.append(c)
+    coords_c = np.array(coords_c)
+
     for interp in interpolation:
         if interp:
-          interp[0] = fineToCoarseNodes[interp[0]]
+            interp[0] = fineToCoarseNodes[interp[0]]
 
-    for p in polyNodes:
+    for ip,p in enumerate(polyNodes):
         nodesOfPoly = polyNodes[p]
-        polyCenter, polyLength = compute_poly_center_and_length(nodesOfPoly, coords)
+        
         polyExterior = polyExteriors[p]
         polyInterior = polyInteriors[p]
-
-        # add bubble nodes to fine mesh
-        assert(numInteriorNodesToAdd==3 or numInteriorNodesToAdd==0)
-        if numInteriorNodesToAdd==3:
-          extendedCoords.append(polyCenter - polyLength * onp.array([0.5, 0.5]))
-          extendedCoords.append(polyCenter + polyLength * onp.array([0.5, 0.0]))
-          extendedCoords.append(polyCenter + polyLength * onp.array([0.0, 0.5]))
+        polyCenter = polyCenters[p]
+        polyLength = polyLengths[p]
 
         polyActiveExterior = []
         for n in polyExterior:
             if activeNodes[n]:
-                polyActiveExterior.append(n)
+                polyActiveExterior.append(fineToCoarseNodes[n])
         for n in range(numInteriorNodesToAdd):
-            polyActiveExterior.append(len(extendedCoords)-numInteriorNodesToAdd+n)
+            polyActiveExterior.append(initialCoordsArrayOffset + numInteriorNodesToAdd*ip + n)
         polyActiveExterior = np.array(polyActiveExterior, dtype=int)
-        polyActiveExterior = fineToCoarseNodes[polyActiveExterior] # watch out with order here, before extendcoords?
 
         if polyLength==0.0:
-            polyLength = 1.0 # need to fix how length scales are computed
+            polyLength = 1.0
             print('bad poly length')
 
-        npExtendedCoords = coords_c # eventually need to append to coords_c
+        #print('active poly neighbors = ', polyActiveExterior)
+
         for iNode in polyInterior:
-            weights = rkpm(polyActiveExterior, npExtendedCoords, coords[iNode], polyLength)
+            weights = rkpm(polyActiveExterior, coords_c, coords[iNode], polyLength)
             interpolation[iNode] = (polyActiveExterior, weights)
 
     # all active nodes are their own neighbors with weight 1.  do this now that all actives/inactives are established
     for n in range(len(activeNodes)):
         if activeNodes[n]:
             interpolation[n] = (np.array([fineToCoarseNodes[n]], dtype=int), np.array([1.0])) # neighbors and weights
+
+    #for n,interp in enumerate(interpolation):
+    #    print(n,':',interp[0])
 
     return interpolation, activeNodes, coords_c

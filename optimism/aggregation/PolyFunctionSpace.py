@@ -226,19 +226,21 @@ def construct_structured_elem_interpolations(polys):
 
 
 @timeme
-def construct_coarse_restriction(interpolation, numCoarseNodes):
+def construct_coarse_restriction(interpolation : Interpolation):
 
-    restriction = [list() for n in range(numCoarseNodes)]
+    restriction = [list() for n in range(interpolation.coordinates.shape[0])]
+
+    #for n,interp in enumerate(interpolation.interpolation):
+    #    print(n,':',interp[0])
 
     # transpose the interpolation and only consider coarse nodes
-    for mynode,restrict in enumerate(interpolation):
-        mynode = int(mynode)
+    for mynode,restrict in enumerate(interpolation.interpolation):
+        #mynode = int(mynode)
         neighbors = restrict[0]
         weights = restrict[1]
 
         for n,node in enumerate(neighbors):
-            node = node
-            coarseNodeId = node
+            coarseNodeId = int(node)
             if coarseNodeId >= 0:
                 if restriction[coarseNodeId]:
                     restriction[coarseNodeId][0].append(mynode)
@@ -246,7 +248,13 @@ def construct_coarse_restriction(interpolation, numCoarseNodes):
                 else:
                     restriction[coarseNodeId] = list(([mynode],[weights[n]]))
 
-    for r in restriction:
-        r[0] = np.array(r[0], dtype=int)
-        r[1] = np.array(r[1])
+    for ir,r in enumerate(restriction):
+        if len(r):
+            r[0] = np.array(r[0], dtype=int)
+            r[1] = np.array(r[1])
+        else:
+            print('fix needed')
+            restriction[ir] = list((np.array([0], dtype=int),np.array([0.0])))
+            exit(1)
+
     return restriction

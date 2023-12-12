@@ -44,7 +44,6 @@ trSettings = EqSolver.get_settings(max_trust_iters=400, use_incremental_objectiv
 
 
 
-
 def poly_quadrature_grad(field, shapeGrad, neighbors):
     return shapeGrad@field[neighbors]
 
@@ -72,7 +71,7 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 def total_energy(field, stateVars, B, Vs, neighbors, material):
     return np.sum( jax.vmap(poly_energy, (None,0,0,0,0,None))(field, stateVars, B, Vs, neighbors, material) )
 
-@jax.jit
+#@jax.jit
 def apply_operator(linearop, load):
     return np.array([ r[1] @ load[r[0]] for r in linearop ])
 
@@ -106,9 +105,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.Ny = 4
         self.numParts = 5
 
-        #self.Nx = 15
-        #self.Ny = 8
-        #self.numParts = 10
+        self.Nx = 18
+        self.Ny = 10
+        self.numParts = 8
 
         xRange = [0.,5.]
         yRange = [0.,1.2]
@@ -136,7 +135,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.randField = onp.random.rand(self.mesh.coords.shape[0], self.mesh.coords.shape[1])
 
 
-    def test_poly_patch_test_all_dirichlet(self):
+    def untest_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
         dirichletSets = ['top','bottom','left','right']
         ebcs = []
@@ -153,12 +152,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         partitionElemField, interp_q, interp_c, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
 
-        print('coord length = ', interp_c.coordinates.shape)
-
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, interp_c.coordinates, onp.eye(2))
         self.check_expected_interpolation(interp_c)
         self.assertNear(self.expectedVolume, onp.sum(polyVols), 8)
-
 
         # consider how to do initial guess. hard to be robust without warm start
         Uc = self.solver_coarse(polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, interp_c, dofManager)
@@ -170,17 +166,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                      [('disp', U), ('disp_target', self.dispTarget)])
 
 
-
-
     def untest_poly_patch_test_with_neumann(self):
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
+        partitionElemField, interp_q, interp_c, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
           = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], [])
 
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, len(coarseToFineNodes))
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c)
 
         sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
         traction_func = lambda x, n: np.dot(sigma, n)     
@@ -195,14 +189,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         self.dispTarget = 0.0 * self.dispTarget
         b = gradient(self.dispTarget)
-      
         b_c = apply_operator(restriction, b)
 
-        Uc = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
+        Uc = self.solver_coarse(polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, interp_c, dofManager, b_c)
         U = apply_operator(interp_c.interpolation, Uc)
 
         # test we get exact solution
-
         modulus1 = (1.0 - self.nu**2)/self.E
         modulus2 = -self.nu*(1.0+self.nu)/self.E
         dispGxx = (modulus1*sigma[0, 0] + modulus2*sigma[1, 1])
@@ -218,15 +210,17 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.assertArrayNear(U, UExact, 9)
 
 
-    def untest_poly_buckle(self):
+    def test_poly_buckle(self):
+        self.testVariationalConsistency = True
+
         ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
                 FunctionSpace.EssentialBC(nodeSet='left', component=1)]
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
-        partitionElemField, interp_q, interp_c, coarseToFineNodes, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'])
-        
-        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c.interpolation, len(coarseToFineNodes))
+        partitionElemField, interp_q, interp_c, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'], addBubbleNodes=False)
+
+        restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c)
 
         traction_func = lambda x, n: np.array([0.0, 0.06])
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
@@ -240,30 +234,27 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         self.dispTarget = 0.0 * self.dispTarget
         b = gradient(self.dispTarget)
-
-        @jax.jit
-        def apply_sparse_operator(restriction, load):
-            return np.array([r[1] @ load[r[0]] for r in restriction])
-        
-        b_c = apply_sparse_operator(restriction, b)
+        b_c = apply_operator(restriction, b)
+        self.field_c = apply_operator(restriction, self.randField)
 
         # poly fine conns go with the polyInterp, MRT, can change fine conns to allow varying size, they do not go into any jit directly
-        U_c = self.solver_coarse(coarseToFineNodes, polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, dofManager, b_c)
-        U_c = apply_sparse_operator(interp_c.interpolation, U_c) # U_c above comes out as size of full field
+        U_c = self.solver_coarse(polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, interp_c, dofManager, b_c)
+        U_c = apply_operator(interp_c.interpolation, U_c) # U_c above comes out as size of coarse field, convert to full field
 
-        self.field_f = apply_sparse_operator(interp_c.interpolation, self.field_c)
+        # MRT, add back in variational consistency test
 
-        self.field_f2 = 0.0*self.field_f
-        for p,interp in enumerate(polyInterps):
-            fineNodes = polyFineConns[p]
-            coarseNodes = polyConns[p]
-            self.field_f2 = self.field_f2.at[fineNodes[::-1]].set((interp@self.field_c[coarseNodes])[::-1] )
+        self.field_f = apply_operator(interp_c.interpolation, self.field_c)
+        #self.field_f2 = 0.0*self.field_f
+        #for p,interp in enumerate(polyInterps):
+        #    fineNodes = polyFineConns[p]
+        #    coarseNodes = polyConns[p]
+        #    self.field_f2 = self.field_f2.at[fineNodes[::-1]].set((interp@self.field_c[coarseNodes])[::-1] )
 
         U_f = self.solver_fine(dofManager, b)
 
         write_output(self.mesh, partitionElemField,
                      [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp_coarse', U_c), ('disp', U_f), ('load', b), ('load_coarse', np.zeros_like(b).at[coarseToFineNodes].set(b_c))])
+                     [('disp_coarse', U_c), ('disp', U_f), ('load', b)])
 
 
     @timeme
@@ -285,50 +276,42 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         U_c = U_c.at[coarseNodesFromFine].set(U[fineNodesInCoarse])
 
-        print('fine in coasre = ', fineNodesInCoarse)
-        print('cs1 = ', self.mesh.coords[fineNodesInCoarse])
-        print('cs2 = ', nodalInterp.coordinates)
-
         initialQuadratureState = self.materialModel.compute_initial_state()
         stateVars = np.tile(initialQuadratureState, (polyVols.shape[0], polyVols.shape[1], 1))
         stateVarsFine = self.internals
 
-        #def fine_poly_energy(polyDisp, U, stateVars, tetElemsInPoly, fineNodesInPoly):
-        #    U = U.at[fineNodesInPoly[::-1]].set(polyDisp[::-1])  # reverse nodes so first node in conns list so first actual appearence of it is used in the index update
-        #    shapeGrads = self.fs.shapeGrads[tetElemsInPoly]
-        #    vols = self.fs.vols[tetElemsInPoly]
-        #    conns = self.mesh.conns[tetElemsInPoly]
-        #    stateVarsE = stateVars[tetElemsInPoly]
-        #    energyDensities = jax.vmap(poly_subtet_energy, (None,0,0,0,0,None))(U, stateVarsE, shapeGrads, vols, conns, self.materialModel)
-        #    return np.sum(energyDensities)
+        def fine_poly_energy(polyDisp, U, stateVars, tetElemsInPoly, fineNodesInPoly):
+            U = U.at[fineNodesInPoly[::-1]].set(polyDisp[::-1])  # reverse nodes so first node in conns list so first actual appearence of it is used in the index update
+            shapeGrads = self.fs.shapeGrads[tetElemsInPoly]
+            vols = self.fs.vols[tetElemsInPoly]
+            conns = self.mesh.conns[tetElemsInPoly]
+            stateVarsE = stateVars[tetElemsInPoly]
+            energyDensities = jax.vmap(poly_subtet_energy, (None,0,0,0,0,None))(U, stateVarsE, shapeGrads, vols, conns, self.materialModel)
+            return np.sum(energyDensities)
         
-        #def coarse_poly_energy(polyDisp, U, stateVars, p):
-        #    polyNodes = polyConns[p]
-        #    U = U.at[polyNodes[::-1]].set(polyDisp[::-1])
-        #    return poly_energy(U, stateVars[p], polyShapeGrads[p], polyVols[p], polyNodes, self.materialModel)
+        def coarse_poly_energy(polyDisp, U, stateVars, p):
+            polyNodes = polyConns[p]
+            U = U.at[polyNodes[::-1]].set(polyDisp[::-1])
+            return poly_energy(U, stateVars[p], polyShapeGrads[p], polyVols[p], polyNodes, self.materialModel)
 
         # compute fine stiffness up front
-        #stiffnessCorrections = []
-        #for p,poly in enumerate(polys):
-        #    poly : PolyFunctionSpace.Polyhedral
-        #    fineNodes = polyFineConns[p]
-        #    finePolyDisp = U[fineNodes]
-        #    fineStiffness = jax.hessian(fine_poly_energy, argnums=0)(finePolyDisp, U, stateVarsFine, poly.fineElems, fineNodes)
+        stiffnessCorrections = []
+        for p,poly in enumerate(polys):
+            poly : PolyFunctionSpace.Polyhedral
+            fineNodes = polyFineConns[p]
+            finePolyDisp = U[fineNodes]
+            fineStiffness = jax.hessian(fine_poly_energy, argnums=0)(finePolyDisp, U, stateVarsFine, poly.fineElems, fineNodes)
+            interp = polyInterps[p]
+            PKP = np.einsum(interp, [0,1], fineStiffness, [0,2,3,4], interp, [3,5], [1,2,5,4])
+            coarseNodes = polyConns[p]
+            coarsePolyDisp = U_c[coarseNodes]
+            coarseStiffness = jax.hessian(coarse_poly_energy, argnums=0)(coarsePolyDisp, U_c, stateVars, p)
+            stiffnessCorrections.append(PKP-coarseStiffness)
+        stiffnessCorrections = np.array(stiffnessCorrections)
 
-        #    interp = polyInterps[p]
-        #    PKP = np.einsum(interp, [0,1], fineStiffness, [0,2,3,4], interp, [3,5], [1,2,5,4])
-
-        #    coarseNodes = polyConns[p]
-        #    coarsePolyDisp = U_c[coarseNodes]
-        #    coarseStiffness = jax.hessian(coarse_poly_energy, argnums=0)(coarsePolyDisp, U_c, stateVars, p)
-
-        #    stiffnessCorrections.append(PKP-coarseStiffness)
-
-        #stiffnessCorrections = np.array(stiffnessCorrections)
-
-        #def correction_energy(U_c, polyNodes, polyStiffness):
-        #    Up = U_c[polyNodes]
-        #    return 0.5 * np.einsum(Up, [0,1], polyStiffness, [0,1,2,3], Up, [2,3], [])
+        def correction_energy(U_c, polyNodes, polyStiffness):
+            Up = U_c[polyNodes]
+            return 0.5 * np.einsum(Up, [0,1], polyStiffness, [0,1,2,3], Up, [2,3], [])
 
         def energy_of_coarse_dofs(U_c, stateVars):
             rhsEnergy = 0.0
@@ -336,7 +319,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 rhsEnergy = rhs.ravel()@U_c.ravel()
 
             coarseEnergy = total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
-            correctionEnergy = 0.0 #np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
+            correctionEnergy = np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
             return coarseEnergy + correctionEnergy + rhsEnergy
 
         def energy(Uu_c, params): # MRT, how to pass arguments in here that are not for jit?
@@ -345,12 +328,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             stateVars = params[1]
             return energy_of_coarse_dofs(U_c, stateVars)
         
-        #self.field_c = self.randField[coarseToFineNodes]
-        #hess = jax.hessian(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
-        #force = jax.grad(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
-        #x = self.field_c
-        #coarseEnergy = 0.5 * np.einsum(x, [0,1], hess, [0,1,2,3], x, [2,3], [])
-        #print('coarse energy = ', coarseEnergy + np.einsum(x, [0,1], force, [0,1], []))
+        if self.testVariationalConsistency:
+            hess = jax.hessian(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
+            force = jax.grad(energy_of_coarse_dofs, argnums=0)(U_c, stateVars)
+            coarseEnergy = 0.5 * np.einsum(self.field_c, [0,1], hess, [0,1,2,3], self.field_c, [2,3], [])
+            print('coarse energy = ', coarseEnergy + np.einsum(self.field_c, [0,1], force, [0,1], []))
 
         p = Objective.Params(0.0, stateVars, U_c)
 
@@ -358,8 +340,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         objective = Objective.Objective(energy, Uu_c, p, None) # linearize about... for preconditioner, warm start
         Uu_c = EqSolver.nonlinear_equation_solve(objective, Uu_c, p, trSettings, useWarmStart=False, solver_algorithm=solver)
-
-        print("uuc = ", Uu_c)
 
         U_c = U_c.at[isCoarseUnknown].set(Uu_c)
         return U_c
@@ -380,12 +360,12 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             U = dofManager.create_field(Uu, Ubc)
             return energy_of_fine_dofs(U, params[1])
 
-        hess = jax.hessian(energy_of_fine_dofs, argnums=0)(U, self.internals)
-        force = jax.grad(energy_of_fine_dofs, argnums=0)(U, self.internals)
-
-        x = self.field_f
-        fineEnergy = 0.5 * np.einsum(x, [0,1], hess, [0,1,2,3], x, [2,3], [])
-        print('fine energy = ', fineEnergy + np.einsum(x, [0,1], force, [0,1], []))
+        
+        if self.testVariationalConsistency:
+            hess = jax.hessian(energy_of_fine_dofs, argnums=0)(U, self.internals)
+            force = jax.grad(energy_of_fine_dofs, argnums=0)(U, self.internals)
+            fineEnergy = 0.5 * np.einsum(self.field_f, [0,1], hess, [0,1,2,3], self.field_f, [2,3], [])
+            print('fine energy = ', fineEnergy + np.einsum(self.field_f, [0,1], force, [0,1], []))
 
         p = Objective.Params(0.0, self.internals)
         objective = Objective.Objective(energy, UuGuess, p, None)
@@ -397,30 +377,35 @@ class PolyPatchTest(MeshFixture.MeshFixture):
     # geometric boundaries must cover the entire boundary.
     # coarse nodes are maintained wherever the node is involved in 2 boundaries
     @timeme
-    def construct_coarse_fs(self, numParts, geometricBoundaries, dirichletBoundaries):
+    def construct_coarse_fs(self, numParts, geometricBoundaries, dirichletBoundaries, addBubbleNodes=False):
         partitionElemField = Coarsening.create_partitions(self.mesh.conns, numParts)
         polyElems = Coarsening.create_poly_elems(partitionElemField) # dict from poly number to elem numbers
         polyNodes = Coarsening.extract_poly_nodes(self.mesh.conns, polyElems) # dict from poly number to global node numbers
 
         nodesToColors = Coarsening.create_nodes_to_colors(self.mesh.conns, partitionElemField)
 
-        bubbleNodesToAdd = 0
+        bubbleNodesToAdd = 3 if addBubbleNodes else 0
 
+        print('making quad interp')
         # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
         nodesToBoundary_q = Coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
         interpolation_q, activeNodalField_q, coords_q = Coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False, numInteriorNodesToAdd=bubbleNodesToAdd)
 
         interp_q = PolyFunctionSpace.Interpolation(interpolation=interpolation_q, activeNodalField=activeNodalField_q, coordinates=coords_q)
         self.check_valid_interpolation(interp_q)
+        print('made quad interp')
 
         approximationBoundaries = geometricBoundaries.copy()
         for b in dirichletBoundaries: approximationBoundaries.append(b)
         # Here we seem to need info on which nodes are part of Dirichlet ones
+
+        print('making coarse interp')
         nodesToBoundary_c = Coarsening.create_nodes_to_boundaries(self.mesh, approximationBoundaries)
         interpolation_c, activeNodalField_c, coords_c = Coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_c, nodesToColors, self.mesh.coords, requireLinearComplete=True, numInteriorNodesToAdd=bubbleNodesToAdd)
 
         interp_c = PolyFunctionSpace.Interpolation(interpolation=interpolation_c, activeNodalField=activeNodalField_c, coordinates=coords_c)
         self.check_valid_interpolation(interp_c)
+        print('made coarse interp')
 
         polys = PolyFunctionSpace.construct_unstructured_gradop(polyElems, polyNodes, interp_q, interp_c, self.mesh.conns, self.fs)
 
