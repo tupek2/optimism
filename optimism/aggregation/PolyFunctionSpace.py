@@ -1,5 +1,6 @@
 import numpy as onp
 import jax.numpy as np
+from optimism.FunctionSpace import FunctionSpace as FS
 from optimism.Timer import timeme
 
 # data class
@@ -19,8 +20,15 @@ class Polyhedral:
     weights : pytypes.ArrayDevice
 
 
+@dataclass(frozen=True, mappable_dataclass=True)
+class Interpolation:
+    interpolation : pytypes.ArrayDevice
+    activeNodalField : pytypes.ArrayDevice
+    coordinates : pytypes.ArrayDevice
+
+
 @timeme
-def construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, fs):
+def construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, fs : FS):
     globalNodeToLocalNode = {node : n for n,node in enumerate(polyNodes)}
     numFineNodes = len(polyNodes)
 
@@ -54,7 +62,7 @@ def construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, f
     return G, GB, globalNodeToLocalNode
 
 @timeme
-def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp, conns, fs):
+def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp, conns, fs : FS):
     G, GB, globalToLocalNodes = construct_grad_op_all_node_components_on_poly(polyElems, polyNodes, conns, fs)
 
     globalToLocalQuadNodes = {}
@@ -129,10 +137,13 @@ def construct_basis_on_poly(polyElems, polyNodes, quadratureInterp, shapeInterp,
     return qBs, onp.sum(qGq, axis=1), globalToLocalQuadNodes, globalToLocalShapeNodes
 
 @timeme
-def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q, interpolationAndField_c, conns, fs):
+def construct_unstructured_gradop(polyElems, polyNodes,
+                                  interpolationAndField_q : Interpolation,
+                                  interpolationAndField_c : Interpolation,
+                                  conns, fs : FS):
     Bs = list()
     Ws = list()
-    globalConnectivities = list()
+    connectivites_c = list()
 
     interpolation_q = interpolationAndField_q.interpolation
     interpolation_c = interpolationAndField_c.interpolation
@@ -141,19 +152,13 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
         B, W, g2lQuad, g2lShape = construct_basis_on_poly(polyElems[polyI], polyNodes[polyI], interpolation_q, interpolation_c, conns, fs)
         Bs.append(B)
         Ws.append(W)
-        globalConnectivities.append(onp.fromiter(g2lShape.keys(), dtype=int))
-
-    activeNodeField_c = interpolationAndField_c.activeNodalField
-    coarseToFineNodes = onp.array([n for n,x in enumerate(activeNodeField_c) if x], dtype=int)
-    fineToCoarseNodes = -onp.ones_like(interpolationAndField_c.activeNodalField, dtype=int)
-    fineToCoarseNodes[coarseToFineNodes] = onp.arange(coarseToFineNodes.shape[0], dtype=int)
+        connectivites_c.append(onp.fromiter(g2lShape.keys(), dtype=int))
 
     polys = list()
     for polyI, polyE in enumerate(polyElems):
         fineNodes = onp.array(list(polyNodes[polyI]), dtype=int)
-        coarseNodes = onp.array([x for x in fineToCoarseNodes[fineNodes] if x > -1])
-        localCoarseToFineNodes = onp.array([x for x in fineNodes if fineToCoarseNodes[x] > -1])
-        fineToLocalCoarseIndex = {node:n for n,node in enumerate(localCoarseToFineNodes)}
+        coarseNodes = onp.array(connectivites_c[polyI])
+        coarseToLocal = {c:l for l,c in enumerate(coarseNodes)}
         interpMatrix = onp.zeros((len(fineNodes),len(coarseNodes)))
 
         for n_f,node in enumerate(fineNodes):
@@ -161,22 +166,17 @@ def construct_unstructured_gradop(polyElems, polyNodes, interpolationAndField_q,
             interpWeights = interpolation_c[node][1]
             for n_c,neighbor in enumerate(interpNeighbors):
                 neighbor = int(neighbor)
-                localCoarseIndex = fineToLocalCoarseIndex[neighbor]
-                interpMatrix[n_f,localCoarseIndex] += interpWeights[n_c]
+                interpMatrix[n_f,coarseToLocal[neighbor]] += interpWeights[n_c]
 
         B = Bs[polyI]
         W = Ws[polyI]
-        shapeGrad = onp.zeros( (B.shape[0], B.shape[1], len(coarseNodes)) )
 
-        for n,fineNode in enumerate(globalConnectivities[polyI]):
-            localCoarseIndex = fineToLocalCoarseIndex[fineNode]
-            shapeGrad[:,:,localCoarseIndex] = B[:,:,n]
         poly = Polyhedral(fineNodes=fineNodes, coarseNodes=coarseNodes,
                           fineElems=onp.array(list(polyElems[polyI])), interpolation=interpMatrix,
-                          shapeGrad=shapeGrad, weights=W)
+                          shapeGrad=B, weights=W)
         polys.append(poly)
 
-    return polys, coarseToFineNodes, fineToCoarseNodes
+    return polys
 
 @timeme
 def construct_structured_gradop(polys):
