@@ -333,8 +333,8 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
         for iNode in polyInterior:
             weights = rkpm(polyActiveExterior, coords_c, coords[iNode], polyLength, order=2)
             interpolation[iNode] = [polyActiveExterior, weights]
-            print('center, center = ', coords[iNode], polyCenter, polyLength)
-        print('all exter = ', coords_c[polyActiveExterior])
+            #print('center, center = ', coords[iNode], polyCenter, polyLength)
+        #print('all exter = ', coords_c[polyActiveExterior])
 
     # all active nodes are their own neighbors with weight 1.  do this now that all actives/inactives are established
     for n in range(len(activeNodes)):
