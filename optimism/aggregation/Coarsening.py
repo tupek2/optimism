@@ -248,11 +248,9 @@ def compute_poly_center_and_length(polyNodes, coords):
     polyNodes = np.array(list(polyNodes))
     x = coords[polyNodes]
     xc = np.average(x, axis=0)
-    dx = x-np.tile(xc, [x.shape[0],1])
-
-    dx2 = [ddx@ddx for ddx in dx]
-
-    return xc, onp.sqrt( onp.max(dx2) )
+    dx = jax.vmap(lambda x1,x2: x1-x2, (0,None))(x,xc)
+    dx2 = np.array([ddx@ddx for ddx in dx]) / len(dx)
+    return xc, 0.65213*onp.sqrt( onp.max(dx2) )
 
 @timeme
 def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, coords, requireLinearComplete, numInteriorNodesToAdd=0):
@@ -315,10 +313,10 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
     for ip,p in enumerate(polyNodes):
         nodesOfPoly = polyNodes[p]
         
-        polyExterior = polyExteriors[p]
-        polyInterior = polyInteriors[p]
-        polyCenter = polyCenters[p]
-        polyLength = polyLengths[p]
+        polyExterior = polyExteriors[ip]
+        polyInterior = polyInteriors[ip]
+        polyCenter = polyCenters[ip]
+        polyLength = polyLengths[ip]
 
         polyActiveExterior = []
         for n in polyExterior:
@@ -332,16 +330,16 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
             polyLength = 1.0
             print('bad poly length')
 
-        #print('active poly neighbors = ', polyActiveExterior)
-
         for iNode in polyInterior:
-            weights = rkpm(polyActiveExterior, coords_c, coords[iNode], polyLength)
-            interpolation[iNode] = (polyActiveExterior, weights)
+            weights = rkpm(polyActiveExterior, coords_c, coords[iNode], polyLength, order=2)
+            interpolation[iNode] = [polyActiveExterior, weights]
+            print('center, center = ', coords[iNode], polyCenter, polyLength)
+        print('all exter = ', coords_c[polyActiveExterior])
 
     # all active nodes are their own neighbors with weight 1.  do this now that all actives/inactives are established
     for n in range(len(activeNodes)):
         if activeNodes[n]:
-            interpolation[n] = (np.array([fineToCoarseNodes[n]], dtype=int), np.array([1.0])) # neighbors and weights
+            interpolation[n] = [np.array([fineToCoarseNodes[n]], dtype=int), np.array([1.0])] # neighbors and weights
 
     #for n,interp in enumerate(interpolation):
     #    print(n,':',interp[0])

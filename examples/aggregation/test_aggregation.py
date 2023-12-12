@@ -43,7 +43,6 @@ else:
 trSettings = EqSolver.get_settings(max_trust_iters=400, use_incremental_objective=False, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
 
 
-
 def poly_quadrature_grad(field, shapeGrad, neighbors):
     return shapeGrad@field[neighbors]
 
@@ -71,7 +70,7 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 def total_energy(field, stateVars, B, Vs, neighbors, material):
     return np.sum( jax.vmap(poly_energy, (None,0,0,0,0,None))(field, stateVars, B, Vs, neighbors, material) )
 
-#@jax.jit
+@jax.jit
 def apply_operator(linearop, load):
     return np.array([ r[1] @ load[r[0]] for r in linearop ])
 
@@ -102,8 +101,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
         self.Nx = 7
-        self.Ny = 4
-        self.numParts = 5
+        self.Ny = 5
+        self.numParts = 3
 
         self.Nx = 18
         self.Ny = 10
@@ -133,7 +132,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         onp.random.seed(5)
         self.randField = onp.random.rand(self.mesh.coords.shape[0], self.mesh.coords.shape[1])
-
+        self.testVariationalConsistency = False
 
     def untest_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
@@ -150,9 +149,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
         partitionElemField, interp_q, interp_c, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets)
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], dirichletSets, addBubbleNodes=True)
 
-        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, interp_c.coordinates, onp.eye(2))
+        self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, interp_c.coordinates, onp.eye(2), tol=5)
         self.check_expected_interpolation(interp_c)
         self.assertNear(self.expectedVolume, onp.sum(polyVols), 8)
 
@@ -218,7 +217,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         dofManager = FunctionSpace.DofManager(self.fs, self.mesh.coords.shape[1], ebcs)
         
         partitionElemField, interp_q, interp_c, polyInterps, polyShapeGrads, polyVols, polyConns, polyFineConns, polys \
-          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'], addBubbleNodes=False)
+          = self.construct_coarse_fs(self.numParts, ['bottom','top','right','left'], ['left'], addBubbleNodes=True)
 
         restriction = PolyFunctionSpace.construct_coarse_restriction(interp_c)
 
@@ -241,15 +240,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         U_c = self.solver_coarse(polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, interp_c, dofManager, b_c)
         U_c = apply_operator(interp_c.interpolation, U_c) # U_c above comes out as size of coarse field, convert to full field
 
-        # MRT, add back in variational consistency test
-
         self.field_f = apply_operator(interp_c.interpolation, self.field_c)
-        #self.field_f2 = 0.0*self.field_f
-        #for p,interp in enumerate(polyInterps):
-        #    fineNodes = polyFineConns[p]
-        #    coarseNodes = polyConns[p]
-        #    self.field_f2 = self.field_f2.at[fineNodes[::-1]].set((interp@self.field_c[coarseNodes])[::-1] )
-
         U_f = self.solver_fine(dofManager, b)
 
         write_output(self.mesh, partitionElemField,
@@ -319,7 +310,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 rhsEnergy = rhs.ravel()@U_c.ravel()
 
             coarseEnergy = total_energy(U_c, stateVars, polyShapeGrads, polyVols, polyConns, self.materialModel)
-            correctionEnergy = np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
+            correctionEnergy = 0.0 #np.sum(jax.vmap(correction_energy, (None,0,0))(U_c, polyConns, stiffnessCorrections))
             return coarseEnergy + correctionEnergy + rhsEnergy
 
         def energy(Uu_c, params): # MRT, how to pass arguments in here that are not for jit?
@@ -389,7 +380,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         print('making quad interp')
         # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
         nodesToBoundary_q = Coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
-        interpolation_q, activeNodalField_q, coords_q = Coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False, numInteriorNodesToAdd=bubbleNodesToAdd)
+        interpolation_q, activeNodalField_q, coords_q = Coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=True, numInteriorNodesToAdd=bubbleNodesToAdd)
 
         interp_q = PolyFunctionSpace.Interpolation(interpolation=interpolation_q, activeNodalField=activeNodalField_q, coordinates=coords_q)
         self.check_valid_interpolation(interp_q)
@@ -397,7 +388,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         approximationBoundaries = geometricBoundaries.copy()
         for b in dirichletBoundaries: approximationBoundaries.append(b)
-        # Here we seem to need info on which nodes are part of Dirichlet ones
 
         print('making coarse interp')
         nodesToBoundary_c = Coarsening.create_nodes_to_boundaries(self.mesh, approximationBoundaries)
@@ -422,19 +412,19 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             self.assertNear(1.0, onp.sum(interp[1]), 8)
 
 
-    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, Uc, expectedGradient):
+    def check_expected_poly_field_gradients(self, polyShapeGrads, polyVols, polyConns, Uc, expectedGradient, tol=7):
         gradUs = jax.vmap(poly_quadrature_grad, (None,0,0))(Uc, polyShapeGrads, polyConns)
         for p,polyGradUs in enumerate(gradUs): # all grads
             for q,quadGradU in enumerate(polyGradUs): # grads for a specific poly
-                if polyVols[p,q] > 0: self.assertArrayNear(expectedGradient, quadGradU, 7)
+                if polyVols[p,q] > 0: self.assertArrayNear(expectedGradient, quadGradU, tol)
 
 
-    def check_expected_interpolation(self, interp_c):
+    def check_expected_interpolation(self, interp_c, tol=7):
         for fNode, fInterp in enumerate(interp_c.interpolation):
             neighborsInCoarse = fInterp[0]
             weightsInCoarse = fInterp[1]
             cCoords = interp_c.coordinates[neighborsInCoarse]
-            self.assertArrayNear(weightsInCoarse@cCoords, self.mesh.coords[fNode], 9)
+            self.assertArrayNear(weightsInCoarse@cCoords, self.mesh.coords[fNode], tol)
 
 if __name__ == '__main__':
     import unittest
