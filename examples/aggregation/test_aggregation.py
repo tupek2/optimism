@@ -23,8 +23,8 @@ from optimism.FunctionSpace import DofManager
 import optimism.TensorMath as TensorMath
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
-from optimism.material import Neohookean as MatModel
-#from optimism.material import LinearElastic as MatModel
+#from optimism.material import Neohookean as MatModel
+from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
 
 # solver stuff
@@ -106,7 +106,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         self.Nx = 18
         self.Ny = 10
-        self.numParts = 8 # self.numParts = 12 breaks with 12, probably local matrix inversion issue?
+        self.numParts = 10 #12 # self.numParts = 12 breaks with 12, probably local matrix inversion issue?
 
         xRange = [0.,5.]
         yRange = [0.,1.2]
@@ -194,7 +194,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Uc = self.solver_coarse(polyShapeGrads, polyVols, polyConns, polyFineConns, polyInterps, polys, interp_c, dofManager, b_c)
         U = apply_operator(interp_c.interpolation, Uc)
 
-        # test we get exact solution
+        # check we get exact solution
         modulus1 = (1.0 - self.nu**2)/self.E
         modulus2 = -self.nu*(1.0+self.nu)/self.E
         dispGxx = (modulus1*sigma[0, 0] + modulus2*sigma[1, 1])
@@ -288,10 +288,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             return poly_energy(U, stateVars[p], polyShapeGrads[p], polyVols[p], polyNodes, self.materialModel)
 
         # compute fine stiffness up front
-        #stiffnessCorrections = self.compute_stiffness_corrections(nodalInterp, polys, polyConns, polyInterps, polyFineConns, U, stateVarsFine, U_c, stateVars,
-        #                                                          fine_poly_energy, coarse_poly_energy)
-        stiffnessCorrections = self.compute_stiffness_corrections2(polys, polyConns, polyInterps, polyFineConns, U, stateVarsFine, U_c, stateVars,
-                                                                   fine_poly_energy, coarse_poly_energy)
+        stiffnessCorrections = self.compute_stiffness_corrections(nodalInterp, polys, polyConns, polyInterps, polyFineConns, U, stateVarsFine, U_c, stateVars,
+                                                                  fine_poly_energy, coarse_poly_energy)
+        #stiffnessCorrections = self.compute_stiffness_corrections2(polys, polyConns, polyInterps, polyFineConns, U, stateVarsFine, U_c, stateVars,
+        #                                                           fine_poly_energy, coarse_poly_energy)
 
         def correction_energy(U_c, polyNodes, polyStiffness):
             Up = U_c[polyNodes]
@@ -436,7 +436,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         # MRT, consider switching to a single boundary.  Do the edge algorithm, then determine if additional nodes are required for full-rank moment matrix
         nodesToBoundary_q = Coarsening.create_nodes_to_boundaries(self.mesh, geometricBoundaries)
-        interpolation_q, activeNodalField_q, coords_q, skeleton_q = Coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=True, numInteriorNodesToAdd=bubbleNodesToAdd)
+        interpolation_q, activeNodalField_q, coords_q, skeleton_q = Coarsening.create_interpolation_over_domain(polyNodes, nodesToBoundary_q, nodesToColors, self.mesh.coords, requireLinearComplete=False, numInteriorNodesToAdd=bubbleNodesToAdd)
 
         interp_q = PolyFunctionSpace.Interpolation(interpolation=interpolation_q, activeNodalField=activeNodalField_q, coordinates=coords_q, skeleton=skeleton_q)
         self.check_valid_interpolation(interp_q)

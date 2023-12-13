@@ -334,8 +334,9 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
             polyLength = 1.0
             print('bad poly length')
 
+        orderToUse = 2 if numInteriorNodesToAdd else 1
         for iNode in polyInterior:
-            weights = rkpm(polyActiveExterior, coords_c, coords[iNode], polyLength, order=2)
+            weights = rkpm(polyActiveExterior, coords_c, coords[iNode], polyLength, order=orderToUse)
             interpolation[iNode] = [polyActiveExterior, weights]
             #print('center, center = ', coords[iNode], polyCenter, polyLength)
         #print('all exter = ', coords_c[polyActiveExterior])
