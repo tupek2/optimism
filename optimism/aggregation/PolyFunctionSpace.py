@@ -25,6 +25,7 @@ class Interpolation:
     interpolation : pytypes.ArrayDevice
     activeNodalField : pytypes.ArrayDevice
     coordinates : pytypes.ArrayDevice
+    skeleton : pytypes.ArrayDevice
 
 
 @timeme

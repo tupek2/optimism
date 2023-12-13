@@ -259,6 +259,7 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
     activate_nodes(nodesToColors, nodesToBoundary, activeNodes)
 
     interpolation = [[] for n in range(len(activeNodes))]
+    onSkeleton = onp.full_like(activeNodes, False, dtype=bool)
 
     bubbleNodeCoords = []
 
@@ -279,12 +280,15 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
 
         for f in polyFaces:
             # warning, this next function modifies activeNodes
-            active, inactive, lengthScale = determine_active_and_inactive_face_nodes(polyFaces[f], coords, activeNodes, requireLinearComplete)
+            faceNodes = onp.array(list(polyFaces[f]))
+            active, inactive, lengthScale = determine_active_and_inactive_face_nodes(faceNodes, coords, activeNodes, requireLinearComplete)
             active = np.array(active)
             for iNode in inactive:
                 if lengthScale==0.0: lengthScale = 1.0
                 weights = rkpm(active, coords, coords[iNode], lengthScale)
                 interpolation[iNode] = [active, weights]
+
+            onSkeleton[faceNodes] = True
 
         # add bubble nodes to fine mesh
         assert(numInteriorNodesToAdd==3 or numInteriorNodesToAdd==0)
@@ -323,7 +327,7 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
             if activeNodes[n]:
                 polyActiveExterior.append(fineToCoarseNodes[n])
         for n in range(numInteriorNodesToAdd):
-            polyActiveExterior.append(initialCoordsArrayOffset + numInteriorNodesToAdd*ip + n)
+            polyActiveExterior.append(initialCoordsArrayOffset + numInteriorNodesToAdd * ip + n)
         polyActiveExterior = np.array(polyActiveExterior, dtype=int)
 
         if polyLength==0.0:
@@ -344,4 +348,4 @@ def create_interpolation_over_domain(polyNodes, nodesToBoundary, nodesToColors, 
     #for n,interp in enumerate(interpolation):
     #    print(n,':',interp[0])
 
-    return interpolation, activeNodes, coords_c
+    return interpolation, activeNodes, coords_c, np.array(onSkeleton, dtype=bool)
