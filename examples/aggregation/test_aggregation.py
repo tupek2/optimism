@@ -10,6 +10,7 @@ from chex._src import pytypes
 # testing stuff
 from optimism.test import MeshFixture
 from optimism.Timer import timeme
+from Plotting import output_mesh_and_fields
 
 # poly stuff
 from optimism.aggregation import Coarsening
@@ -30,6 +31,8 @@ from optimism import Mechanics
 # solver stuff
 import optimism.Objective as Objective
 import optimism.EquationSolver as EqSolver
+
+
 
 # hint: _q means shape functions associated with quadrature rule (on coarse mesh)
 # hint: _c means shape functions associated with coarse degrees of freedom
@@ -74,25 +77,7 @@ def total_energy(field, stateVars, B, Vs, neighbors, material):
 def apply_operator(linearop, load):
     return np.array([ r[1] @ load[r[0]] for r in linearop ])
 
-def write_output(mesh, partitions, scalarNodalFields=None, vectorNodalFields=None):
-    from optimism import VTKWriter
-    plotName = 'patch'
-    writer = VTKWriter.VTKWriter(mesh, baseFileName=plotName)
-    for nodeField in scalarNodalFields:
-        writer.add_nodal_field(name=nodeField[0],
-                               nodalData=nodeField[1],
-                               fieldType=VTKWriter.VTKFieldType.SCALARS,
-                               dataType=VTKWriter.VTKDataType.FLOAT)
-    for nodeField in vectorNodalFields:
-        writer.add_nodal_field(name=nodeField[0],
-                               nodalData=nodeField[1],
-                               fieldType=VTKWriter.VTKFieldType.VECTORS,
-                               dataType=VTKWriter.VTKDataType.FLOAT)
-    writer.add_cell_field(name='partition',
-                          cellData=partitions,
-                          fieldType=VTKWriter.VTKFieldType.SCALARS)
-    writer.write()
-    print('write successful')
+
 
 #dofs = 3 * N - 6 = constraints = 6 * Q
 #Q >= N / 2 - 1
@@ -161,9 +146,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, Uc, self.targetDispGrad)
         U = apply_operator(interp_c.interpolation, Uc)
 
-        write_output(self.mesh, partitionElemField,
-                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp', U), ('disp_target', self.dispTarget)])
+        output_mesh_and_fields('patch', self.mesh, 
+                               scalarElemFields = [('partition', partitionElemField)],
+                               scalarNodalFields = [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
+                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget)])
 
 
     def untest_poly_patch_test_with_neumann(self):
@@ -202,9 +188,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         UExact = np.column_stack( (dispGxx*self.mesh.coords[:,0],
                                    dispGyy*self.mesh.coords[:,1]) )
         
-        write_output(self.mesh, partitionElemField,
-                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp', U), ('disp_target', UExact)])
+        output_mesh_and_fields('patch', self.mesh, 
+                               scalarElemFields = [('partition',partitionElemField)],
+                               scalarNodalFields= [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
+                               vectorNodalFields= [('disp', U), ('disp_target', UExact)])
         
         self.check_expected_poly_field_gradients(polyShapeGrads, polyVols, polyConns, Uc, np.array( [[dispGxx,0.0],[0.0,dispGyy]]))
         self.assertArrayNear(U, UExact, 9)
@@ -227,7 +214,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         
         def objective(U):
             loadPotential = Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['right'], traction_func)
-            loadPotential += Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['top'], traction_func)
+            #loadPotential += Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['top'], traction_func)
             return loadPotential
 
         gradient = jax.grad(objective)
@@ -244,9 +231,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.field_f = apply_operator(interp_c.interpolation, self.field_c)
         U_f = self.solver_fine(dofManager, b)
 
-        write_output(self.mesh, partitionElemField,
-                     [('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
-                     [('disp_coarse', U_c), ('disp', U_f), ('load', b)])
+        output_mesh_and_fields('patch', self.mesh,
+                               scalarElemFields=[('partition', partitionElemField)],
+                               scalarNodalFields=[('active2', interp_q.activeNodalField),('active', interp_c.activeNodalField)],
+                               vectorNodalFields=[('disp_coarse', U_c), ('disp', U_f), ('load', b)])
 
 
     @timeme
