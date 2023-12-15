@@ -11,15 +11,20 @@ from ObjectiveMultiLevel import Params
 
 import optimism.EquationSolver as EqSolver
 
-# data class
-#import chex
-#from chex._src.dataclass import dataclass
-#from chex._src import pytypes
 
-#@dataclass(frozen=True, mappable_dataclass=True)
-#class Polyhedral:
-#    a : pytypes.ArrayDevice
-#    b: pytypes.ArrayDevice
+def floor_div(a,b): return a//b
+def ceil_div(a,b): return -(a // -b)
+
+
+def create_interpolation(fineSizes, coarseSizes):
+    @jax.jit
+    def neighbors(iX,iY):
+        xParents = np.array([floor_div(iX,2), ceil_div(iX,2)])
+        yParents = np.array([floor_div(iY,2), ceil_div(iY,2)])
+        return jax.vmap(lambda xp : jax.vmap( lambda x,y: x+coarseSizes[0]*y, (None,0) )(xp, yParents))(xParents).ravel()
+    
+    return jax.vmap(lambda iY: jax.vmap(neighbors,(0,None))(np.arange(fineSizes[0]), iY))(np.arange(fineSizes[1])).reshape(fineSizes[0]*fineSizes[1],4)
+
 
 def create_objective(mesh, dispGuessWithBC,
                      essentialBoundaryConditionsMap,
@@ -98,6 +103,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Nx_f = 13
         Ny_f = 9
         
+    #coords = [ [xs[nx], ys[ny]] for ny in range(Ny) for nx in range(Nx) ]
+
         self.mesh_cc, self.objective_cc, self.construct_field_cc = \
             self.create_mesh_objective_full_field_constructor(Nx_cc, Ny_cc, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann)
         
@@ -107,6 +114,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.mesh_f, self.objective_f, self.construct_field_f = \
             self.create_mesh_objective_full_field_constructor(Nx_f, Ny_f, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann)
 
+        self.c2cc = create_interpolation([Nx_c, Ny_c], [Nx_cc, Ny_cc])
+        self.f2cc = create_interpolation([Nx_f, Ny_f], [Nx_c, Ny_c])
+
+        print(self.c2cc)
+
 
     def create_mesh_objective_full_field_constructor(self, Nx, Ny, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann):
         mesh, disp0 = self.create_mesh_and_disp(Nx, Ny, xRange, yRange, lambda x : 0*x)
@@ -115,7 +127,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
     
 
     def testMultilevelSolver(self):
-
+        
         U_cc = self.construct_field_cc(minimize_objective(self.objective_cc))
         U_c = self.construct_field_c(minimize_objective(self.objective_c))
         U_f = self.construct_field_f(minimize_objective(self.objective_f))
