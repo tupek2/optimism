@@ -1,6 +1,7 @@
 from optimism.JaxConfig import *
 from jax.numpy.linalg import norm, eigh
 
+# trust region eigen solver
 
 def energy(A, b, s):
     return 0.5*s@(A@s) + s@b
@@ -21,7 +22,7 @@ def solve(A, b, Delta):
 
     # Check if solution is inside the trust region
     if sig[0]>0 and norm(bv/sig) < Delta:
-        return -v@(bv/sig)
+        return -np.linalg.solve(A,b) #-v@(bv/sig)
 
     # if we get here, the solution must be on the tr boundary 
     

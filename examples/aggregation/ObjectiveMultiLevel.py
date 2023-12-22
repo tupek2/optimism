@@ -10,10 +10,15 @@ class Objective:
         
         self.objective=jit(f)
         self.grad_x = jit(grad(f,0))
+        self.objective_and_grad_x = jit(value_and_grad(f,0))
+
         self.grad_p = jit(grad(f,1))
         
         self.hess_vec   = jit(lambda x, p, vx:
                               jvp(lambda z: self.grad_x(z,p), (x,), (vx,))[1])
+
+        self.hess_vec_mult_rhs = jit(lambda x, p, vxs:
+                                     vmap(partial(jvp, lambda z: self.grad_x(z,p), (x,)), out_axes=(None,0))((vxs,))[1])
 
         self.vec_hess   = jit(lambda x, p, vx:
                               vjp(lambda z: self.grad_x(z,p), x)[1](vx))
@@ -52,6 +57,9 @@ class Objective:
     def value(self, x):
         return self.objective(x, self.p)
 
+    def value_and_gradient(self, x):
+        return self.objective_and_grad_x(x, self.p)
+
     def gradient(self, x):
         return self.grad_x(x, self.p)
     
@@ -60,6 +68,9 @@ class Objective:
 
     def hessian_vec(self, x, vx):
         return self.hess_vec(x, self.p, vx)
+
+    def hessian_vec_mult_rhs(self, x, vxs):
+        return self.hess_vec_mult_rhs(x, self.p, vxs)
 
     def gradient_and_tangent(self, x):
         return self.grad_and_tangent(x, self.p)

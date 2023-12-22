@@ -189,7 +189,6 @@ def trust_region_subspace_minimize(objective, x, settings, callback=None):
         hess_vec_func = lambda v: objective.hessian_vec(x, v)
 
 
-
         # minimize z^T K z + g^z, z = alpha1*v1 + alpha2*v2 + ...
         subspace = ModelProblem(g)
                 
