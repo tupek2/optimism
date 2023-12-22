@@ -105,20 +105,29 @@ def construct_ortho_bases(listOfVectors):
         assert(firstLen==len(l))
 
     orthoVectors = []
+    #print('num vec in = ', len(listOfVectors))
 
     for vec in listOfVectors:
         vecNorm = np.linalg.norm(vec)
-        if vecNorm > 0: vec = vec / vecNorm
-        else: continue
+        if vecNorm > 0:
+            vec = vec / vecNorm
+        else:
+            #print('this vec is zero or so')
+            continue
 
         alpha = 0.0
         for oldVec in orthoVectors:
             alpha = oldVec@vec
-            if np.abs(alpha) > (1.0-1e-7): continue
+            if np.fabs(alpha) > (1.0-1e-7):
+                #print('this vec is ortho to an old')
+                continue
             vec = vec - alpha * oldVec
 
-        if np.abs(alpha) > (1.0-1e-7): continue
+        if np.fabs(alpha) > (1.0-1e-7):
+            #print("this vec is ortho, outer")
+            continue
 
+        vecNorm = np.linalg.norm(vec)
         if vecNorm > 0: vec = vec / vecNorm
         else: continue
 
@@ -127,7 +136,7 @@ def construct_ortho_bases(listOfVectors):
     return orthoVectors
 
 
-def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
+def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, level):
 
     # fixed settings for now
     eta1 = 0.05
@@ -139,20 +148,21 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
     Hdirections = objectiveObj.hessian_vec_mult_rhs(x, directions)
 
     reducedH = np.einsum(directions, [0,1], Hdirections, [2,1], [0,2])
-    #reducedG = directions@g
-    reducedG = jax.vmap(lambda d : d@g.ravel())(directions)
+    reducedG = directions@g
 
     haveSufficientDecrease = False
     while not haveSufficientDecrease:
         alphas = treigen.solve(reducedH, reducedG, delta)
 
+        if level > 0: print('alpha = ', alphas)
+
         # delta from paper
-        modelEnergyDrop = - 0.5 * alphas @ (reducedH @ alphas) - alphas @ reducedG
+        modelEnergyDrop = -0.5 * alphas @ (reducedH @ alphas) - alphas @ reducedG
 
         if modelEnergyDrop <= 0: 
             print("energy cannot drop any more, maybe call this converged?")
             print(reducedH, reducedG, alphas)
-            return x, o, g, delta
+            return x, o, g, g, delta
 
         s = alphas@directions
         xTrial = x + s
@@ -162,7 +172,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
         gTrial = gTrial + v
         actualEnergyDrop = o - oTrial
 
-        print('model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
+        if level > 0: print('model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
 
         rho = actualEnergyDrop / modelEnergyDrop
 
@@ -172,7 +182,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
         elif rho > eta3 and np.linalg.norm(alphas) > 0.99 * delta: # trust region step near boundary
             delta = gamma2 * delta
 
-        print('delta:',deltaOld,'to',delta)
+        if level > 0: print('delta:',deltaOld,'to',delta)
 
         willAccept = rho >= eta1  #or (rho >= -0 and realResNorm <= gNorm)
         if willAccept:
@@ -181,11 +191,11 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
             x = xTrial
             haveSufficientDecrease = True
 
-    return x, o, g, alphas@Hdirections, delta
+    return x, o, g, -alphas@Hdirections, delta
 
 
 def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, eps_g, eps_d, delta_s):
-    print('starting at ', i)
+    if i > 0: print('starting at ', i)
     
     kappa_g = 0.01 # kappa_g hard code for this structured case
     delta = np.minimum(delta_ip1, delta_s)
@@ -199,7 +209,7 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
 
     extraSearchDirection = gradient
 
-    kmax = 2 if i > 0 else 50
+    kmax = 40 if i > 0 else 400 #2 if i > 0 else 50
     k = 0
     while k < kmax:
         k = k+1
@@ -215,23 +225,25 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
             onlyUseModelAtThisLevel = RgNorm <= kappa_g * gNorm or RgNorm <= eps_g
             # this implies the 'v cycle' strategy, essentially we see that the restricted residual is already so small its not worth working on
             if not onlyUseModelAtThisLevel:
-                print('about to recurse from', i, 'to', i-1)
                 x_im1 = multilevelObjectives.injections[i-1](x_i)
                 s = rmtr(multilevelObjectives, i-1, x_im1, Rg, delta, eps_g, eps_d, delta_s)
                 subspaceDirections.append(multilevelObjectives.interpolations[i-1](s))
-            else:
-                print('not recursing')
+            #else:
+                #print('not recursing')
 
         directions = np.array(construct_ortho_bases(subspaceDirections))
         
-        x_i, o_i, g_i, extraSearchDirection, delta = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta)
+        x_i, o_i, g_i, extraSearchDirection, delta = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta, i)
 
         residualNorm = np.linalg.norm(g_i)
-        print('residual norm at level',i, 'iteration',k,'=', residualNorm)
+
+        indent = " "*(2-i)
+
+        if i > 0: print(indent,'residual norm at level',i, 'iteration',k,'=', residualNorm)
         if residualNorm < eps_g:
-            print('converged at level',i)
+            print(indent,'converged at level',i)
             return x_i - x_i_0
-        print('\n')
+        #print('\n')
 
     return x_i - x_i_0
 
