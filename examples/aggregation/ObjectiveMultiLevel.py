@@ -14,8 +14,8 @@ class Objective:
 
         self.grad_p = jit(grad(f,1))
         
-        self.hess_vec   = jit(lambda x, p, vx:
-                              jvp(lambda z: self.grad_x(z,p), (x,), (vx,))[1])
+        self.hess_vec = jit(lambda x, p, vx:
+                            jvp(lambda z: self.grad_x(z,p), (x,), (vx,))[1])
 
         self.hess_vec_mult_rhs = jit(lambda x, p, vxs:
                                      vmap(partial(jvp, lambda z: self.grad_x(z,p), (x,)), out_axes=(None,0))((vxs,))[1])

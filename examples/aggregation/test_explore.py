@@ -111,13 +111,13 @@ def construct_ortho_bases(listOfVectors):
         if vecNorm > 0: vec = vec / vecNorm
         else: continue
 
-        alpha = 1.0
+        alpha = 0.0
         for oldVec in orthoVectors:
-            alpha = oldVec@vec #np.tensordot(oldVec, vec)
-            if np.abs(alpha) < 1e-6: continue
+            alpha = oldVec@vec
+            if np.abs(alpha) > (1.0-1e-7): continue
             vec = vec - alpha * oldVec
 
-        if np.abs(alpha) < 1e-6: continue
+        if np.abs(alpha) > (1.0-1e-7): continue
 
         if vecNorm > 0: vec = vec / vecNorm
         else: continue
@@ -139,7 +139,8 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
     Hdirections = objectiveObj.hessian_vec_mult_rhs(x, directions)
 
     reducedH = np.einsum(directions, [0,1], Hdirections, [2,1], [0,2])
-    reducedG = directions@g #jax.vmap(lambda d : d@g.ravel())(directions)
+    #reducedG = directions@g
+    reducedG = jax.vmap(lambda d : d@g.ravel())(directions)
 
     haveSufficientDecrease = False
     while not haveSufficientDecrease:
@@ -157,7 +158,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
         xTrial = x + s
 
         oTrial, gTrial = objectiveObj.value_and_gradient(xTrial)
-        oTrial = oTrial + np.tensordot(v, xTrial)
+        oTrial = oTrial + v @ xTrial
         gTrial = gTrial + v
         actualEnergyDrop = o - oTrial
 
@@ -180,7 +181,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta):
             x = xTrial
             haveSufficientDecrease = True
 
-    return x, o, g, alphas@Hdirections
+    return x, o, g, alphas@Hdirections, delta
 
 
 def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, eps_g, eps_d, delta_s):
@@ -223,7 +224,7 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
 
         directions = np.array(construct_ortho_bases(subspaceDirections))
         
-        x_i, o_i, g_i, extraSearchDirection = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta)
+        x_i, o_i, g_i, extraSearchDirection, delta = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta)
 
         residualNorm = np.linalg.norm(g_i)
         print('residual norm at level',i, 'iteration',k,'=', residualNorm)
@@ -301,7 +302,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         objectives = [self.objective_cc, self.objective_c]
         interpolations = [self.interpCFromCC]
         injections = [self.injectCFromCC]
-
         #meshes = [self.mesh_cc, self.mesh_c, self.mesh_f]
         #objectives = [self.objective_cc, self.objective_c, self.objective_f]
         #interpolations = [self.interpCFromCC, self.interpFFromC]
@@ -325,29 +325,32 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         for level, interp in enumerate(apply_interpolations):
           solutions[level+1] = interp(solutions[level])
 
-        #U_f = solutions[-1]
-        #delta = 1.0
-        #dU_f = rmtr(multilevelObjectives, numLevels-1, U_f, objectives[numLevels-1].gradient(U_f), delta, 1e-11, 1e-11, delta)
+        U_f = solutions[-1]
+        delta = 1.0
+        dU_f = rmtr(multilevelObjectives, numLevels-1, U_f, objectives[numLevels-1].gradient(U_f), delta, 1e-11, 1e-11, delta)
+        U_f = U_f + dU_f
 
-        #print('duf = ', np.linalg.norm(dU_f))
-        #output_mesh_and_fields('sol', meshes[-1], vectorNodalFields=[('disp', U_f + dU_f)])
+        mesh_f = meshes[-1]
+        output_mesh_and_fields('sol', mesh_f, vectorNodalFields=[('disp', U_f.reshape(mesh_f.coords.shape))])
 
-        for level, [mesh, solution] in enumerate(zip(meshes, solutions)):
-          output_mesh_and_fields(str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
+        checkMeshTransfers = False
+        if checkMeshTransfers:
+            for level, [mesh, solution] in enumerate(zip(meshes, solutions)):
+                output_mesh_and_fields(str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
 
-        restrictedSolutions = [None]*len(apply_restrictions)
-        for level, restr in enumerate(apply_restrictions):
-          restrictedSolutions[level] = restr(solutions[level+1])
+            restrictedSolutions = [None]*len(apply_restrictions)
+            for level, restr in enumerate(apply_restrictions):
+                restrictedSolutions[level] = restr(solutions[level+1])
 
-        for level, [mesh, solution] in enumerate(zip(meshes[:-1], restrictedSolutions)):
-          output_mesh_and_fields('restr'+str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
+            for level, [mesh, solution] in enumerate(zip(meshes[:-1], restrictedSolutions)):
+                output_mesh_and_fields('restr'+str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
 
-        injectedSolutions = [None]*len(apply_injections)
-        for level, inject in enumerate(apply_injections):
-          injectedSolutions[level] = inject(solutions[level+1])
+            injectedSolutions = [None]*len(apply_injections)
+            for level, inject in enumerate(apply_injections):
+                injectedSolutions[level] = inject(solutions[level+1])
 
-        for level, [mesh, solution] in enumerate(zip(meshes[:-1], injectedSolutions)):
-          output_mesh_and_fields('injec'+str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
+            for level, [mesh, solution] in enumerate(zip(meshes[:-1], injectedSolutions)):
+                output_mesh_and_fields('injec'+str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
 
 
     def construct_restrictions(self, interpolationsI):
