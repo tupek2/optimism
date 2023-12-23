@@ -9,10 +9,12 @@ from optimism import Mechanics
 from optimism.treigen import treigen
 from Plotting import output_mesh_and_fields
 from optimism.material import LinearElastic as MatModel
+import optimism.EquationSolver as EqSolver
+
 from ObjectiveMultiLevel import Objective
 from ObjectiveMultiLevel import Params
 
-import optimism.EquationSolver as EqSolver
+import pickle
 
 
 from chex._src.dataclass import dataclass
@@ -135,6 +137,7 @@ def construct_ortho_bases(listOfVectors):
 
     return orthoVectors
 
+printThresh = -1
 
 def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, level):
 
@@ -154,7 +157,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
     while not haveSufficientDecrease:
         alphas = treigen.solve(reducedH, reducedG, delta)
 
-        if level > 0: print('alpha = ', alphas)
+        if level > printThresh: print('alpha = ', alphas)
 
         # delta from paper
         modelEnergyDrop = -0.5 * alphas @ (reducedH @ alphas) - alphas @ reducedG
@@ -172,9 +175,9 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
         gTrial = gTrial + v
         actualEnergyDrop = o - oTrial
 
-        if level > 0: print('model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
+        if level > printThresh: print('model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
 
-        rho = actualEnergyDrop / modelEnergyDrop
+        rho = (actualEnergyDrop + 1e-10) / (modelEnergyDrop + 1e-10)
 
         deltaOld = delta
         if not rho >= eta2:  # write it this way to handle NaNs
@@ -182,21 +185,28 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
         elif rho > eta3 and np.linalg.norm(alphas) > 0.99 * delta: # trust region step near boundary
             delta = gamma2 * delta
 
-        if level > 0: print('delta:',deltaOld,'to',delta)
+        if level > printThresh: print('delta:',deltaOld,'to',delta)
 
         willAccept = rho >= eta1  #or (rho >= -0 and realResNorm <= gNorm)
         if willAccept:
             o = oTrial
             g = gTrial
+            dx = xTrial - x
             x = xTrial
             haveSufficientDecrease = True
 
-    return x, o, g, -alphas@Hdirections, delta
+    return x, o, g, dx, delta
 
 
 def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, eps_g, eps_d, delta_s):
-    if i > 0: print('starting at ', i)
+    if i > printThresh: print('starting at ', i)
     
+    if False and i==0:
+        data = {'x': x_i_0, 'g': g_i}
+        output = open('data.pkl', 'wb')
+        pickle.dump(data, output)
+        output.close()
+
     kappa_g = 0.01 # kappa_g hard code for this structured case
     delta = np.minimum(delta_ip1, delta_s)
 
@@ -205,11 +215,14 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     x_i = x_i_0.copy()
     o_i, gradient = objectiveObj.value_and_gradient(x_i)
     v_i = g_i - gradient
+
+    print('norm v = ', np.linalg.norm(v_i))
+
     o_i = o_i + v_i @ x_i
 
     extraSearchDirection = gradient
 
-    kmax = 40 if i > 0 else 400 #2 if i > 0 else 50
+    kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
     k = 0
     while k < kmax:
         k = k+1
@@ -228,23 +241,19 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
                 x_im1 = multilevelObjectives.injections[i-1](x_i)
                 s = rmtr(multilevelObjectives, i-1, x_im1, Rg, delta, eps_g, eps_d, delta_s)
                 subspaceDirections.append(multilevelObjectives.interpolations[i-1](s))
-            #else:
-                #print('not recursing')
 
         directions = np.array(construct_ortho_bases(subspaceDirections))
-        
         x_i, o_i, g_i, extraSearchDirection, delta = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta, i)
 
         residualNorm = np.linalg.norm(g_i)
 
         indent = " "*(2-i)
 
-        if i > 0: print(indent,'residual norm at level',i, 'iteration',k,'=', residualNorm)
+        if i > printThresh: print(indent,'residual norm at level',i, 'iteration',k,'=', residualNorm)
         if residualNorm < eps_g:
             print(indent,'converged at level',i)
             return x_i - x_i_0
-        #print('\n')
-
+        
     return x_i - x_i_0
 
 
@@ -335,15 +344,35 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         solutions = [None]*numLevels
         solutions[0] = minimize_objective(objectives[0])
         for level, interp in enumerate(apply_interpolations):
-          solutions[level+1] = interp(solutions[level])
+            solutions[level+1] = interp(solutions[level])
 
-        U_f = solutions[-1]
-        delta = 1.0
-        dU_f = rmtr(multilevelObjectives, numLevels-1, U_f, objectives[numLevels-1].gradient(U_f), delta, 1e-11, 1e-11, delta)
-        U_f = U_f + dU_f
+        testFine = False
+        testCoarse = True
+        #testFine = True
+        #testCoarse = False
 
-        mesh_f = meshes[-1]
-        output_mesh_and_fields('sol', mesh_f, vectorNodalFields=[('disp', U_f.reshape(mesh_f.coords.shape))])
+        if testCoarse:
+            pkl_file = open('data.pkl', 'rb')
+            data = pickle.load(pkl_file)
+            #data = {'x': x_i_0, 'g': g_i}
+            pkl_file.close()
+
+            U_c = 0.5*solutions[0]
+            delta = 1.0
+            dU_c = rmtr(multilevelObjectives, 0, data['x'], data['g'], delta, 1e-11, 1e-11, delta)
+            U_c = U_c + dU_c
+
+            mesh_c = meshes[0]
+            output_mesh_and_fields('sol', mesh_c, vectorNodalFields=[('disp', U_c.reshape(mesh_c.coords.shape))])
+
+        if testFine:
+            U_f = solutions[-1]
+            delta = 1.0
+            dU_f = rmtr(multilevelObjectives, numLevels-1, U_f, objectives[numLevels-1].gradient(U_f), delta, 1e-11, 1e-11, delta)
+            U_f = U_f + dU_f
+
+            mesh_f = meshes[-1]
+            output_mesh_and_fields('sol', mesh_f, vectorNodalFields=[('disp', U_f.reshape(mesh_f.coords.shape))])
 
         checkMeshTransfers = False
         if checkMeshTransfers:
