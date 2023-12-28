@@ -1,6 +1,8 @@
 import jax
 import jax.numpy as np 
 import numpy as onp
+import scipy
+import scipy.linalg as sp_linalg
 from functools import partial
 from optimism.test import MeshFixture
 from optimism import QuadratureRule
@@ -70,7 +72,11 @@ def create_objective(mesh, dispGuessWithBC,
     p = Params(0.0, mcxFuncs.compute_initial_state())
     obj = Objective(energy, dispGuessWithBC.ravel(), p)
     obj.fieldShape = dispGuessWithBC.shape
-    return obj
+
+    def zero_dirichlet(F):
+        return dofManager.create_field(dofManager.get_unknown_values(F.reshape(Ushape)), 0.0*Ubc)
+
+    return obj, zero_dirichlet
 
 
 def minimize_objective(objective : Objective):
@@ -88,9 +94,9 @@ def average_neighbors(vector, coords, neighbors):
 
 
 @jax.jit
-def apply_restriction(vector, coords, restrictionNeighbors, restrictionWeights):
+def apply_restriction(vector, coords, restrictionNeighbors, restrictionWeights, zero_dirichlet):
     vector = vector.reshape(coords.shape)
-    return jax.vmap(lambda ns, ws: ws@vector[ns])(restrictionNeighbors, restrictionWeights).ravel()
+    return zero_dirichlet(jax.vmap(lambda ns, ws: ws@vector[ns])(restrictionNeighbors, restrictionWeights).ravel())
 
 
 @dataclass(frozen=True, mappable_dataclass=False)
@@ -102,40 +108,13 @@ class MultilevelObjectives:
 
 
 def construct_ortho_bases(listOfVectors):
-    firstLen = len(listOfVectors[0])
-    for l in listOfVectors:
-        assert(firstLen==len(l))
-
-    orthoVectors = []
-    #print('num vec in = ', len(listOfVectors))
-
-    for vec in listOfVectors:
-        vecNorm = np.linalg.norm(vec)
-        if vecNorm > 0:
-            vec = vec / vecNorm
-        else:
-            #print('this vec is zero or so')
-            continue
-
-        alpha = 0.0
-        for oldVec in orthoVectors:
-            alpha = oldVec@vec
-            if np.fabs(alpha) > (1.0-1e-7):
-                #print('this vec is ortho to an old')
-                continue
-            vec = vec - alpha * oldVec
-
-        if np.fabs(alpha) > (1.0-1e-7):
-            #print("this vec is ortho, outer")
-            continue
-
-        vecNorm = np.linalg.norm(vec)
-        if vecNorm > 0: vec = vec / vecNorm
-        else: continue
-
-        orthoVectors.append(vec)
-
-    return orthoVectors
+    inputNorms = np.linalg.norm(listOfVectors, axis=1)
+    R,_ = sp_linalg.rq(listOfVectors, mode='economic')
+    #print('R = ', R)
+    independentCols = np.abs(np.diag(R)) > 1e-10*inputNorms
+    #print('ind cols = ', independentCols)
+    _,Q = sp_linalg.rq(listOfVectors[independentCols], mode='economic')
+    return Q
 
 printThresh = -1
 
@@ -148,6 +127,8 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
     gamma1 = 0.4
     gamma2 = 1.8
 
+    indent = " "*2*(2-level)
+
     Hdirections = objectiveObj.hessian_vec_mult_rhs(x, directions)
 
     reducedH = np.einsum(directions, [0,1], Hdirections, [2,1], [0,2])
@@ -157,14 +138,14 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
     while not haveSufficientDecrease:
         alphas = treigen.solve(reducedH, reducedG, delta)
 
-        if level > printThresh: print('alpha = ', alphas)
+        if level > printThresh: print(indent, 'alpha = ', alphas)
 
         # delta from paper
         modelEnergyDrop = -0.5 * alphas @ (reducedH @ alphas) - alphas @ reducedG
 
         if modelEnergyDrop <= 0: 
-            print("energy cannot drop any more, maybe call this converged?")
-            print(reducedH, reducedG, alphas)
+            print(indent, "energy cannot drop any more, maybe call this converged?")
+            print(indent, reducedH, reducedG, alphas)
             return x, o, g, g, delta
 
         s = alphas@directions
@@ -175,7 +156,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
         gTrial = gTrial + v
         actualEnergyDrop = o - oTrial
 
-        if level > printThresh: print('model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
+        if level > printThresh: print(indent, 'model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
 
         rho = (actualEnergyDrop + 1e-10) / (modelEnergyDrop + 1e-10)
 
@@ -185,7 +166,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
         elif rho > eta3 and np.linalg.norm(alphas) > 0.99 * delta: # trust region step near boundary
             delta = gamma2 * delta
 
-        if level > printThresh: print('delta:',deltaOld,'to',delta)
+        if level > printThresh: print(indent, 'delta:',deltaOld,'to',delta)
 
         willAccept = rho >= eta1  #or (rho >= -0 and realResNorm <= gNorm)
         if willAccept:
@@ -201,6 +182,8 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
 def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, eps_g, eps_d, delta_s):
     if i > printThresh: print('starting at ', i)
     
+    indent = " "*2*(2-i)
+
     if False and i==0:
         data = {'x': x_i_0, 'g': g_i}
         output = open('data.pkl', 'wb')
@@ -216,11 +199,11 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     o_i, gradient = objectiveObj.value_and_gradient(x_i)
     v_i = g_i - gradient
 
-    print('norm v = ', np.linalg.norm(v_i))
 
     o_i = o_i + v_i @ x_i
 
     extraSearchDirection = gradient
+    #oldSubspaceDirections = []
 
     kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
     k = 0
@@ -242,12 +225,10 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
                 s = rmtr(multilevelObjectives, i-1, x_im1, Rg, delta, eps_g, eps_d, delta_s)
                 subspaceDirections.append(multilevelObjectives.interpolations[i-1](s))
 
-        directions = np.array(construct_ortho_bases(subspaceDirections))
+        directions = np.array(construct_ortho_bases(np.array(subspaceDirections)))
         x_i, o_i, g_i, extraSearchDirection, delta = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta, i)
 
         residualNorm = np.linalg.norm(g_i)
-
-        indent = " "*(2-i)
 
         if i > printThresh: print(indent,'residual norm at level',i, 'iteration',k,'=', residualNorm)
         if residualNorm < eps_g:
@@ -296,13 +277,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Nx_f = 13
         Ny_f = 9
         
-        self.mesh_cc, self.objective_cc = \
+        self.mesh_cc, self.objective_cc, self.zero_dirichlet_cc = \
             self.create_mesh_and_objective(Nx_cc, Ny_cc, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann)
         
-        self.mesh_c, self.objective_c = \
+        self.mesh_c, self.objective_c, self.zero_dirichlet_c = \
             self.create_mesh_and_objective(Nx_c, Ny_c, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann)
 
-        self.mesh_f, self.objective_f = \
+        self.mesh_f, self.objective_f, self.zero_dirichlet_f = \
             self.create_mesh_and_objective(Nx_f, Ny_f, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann)
 
         self.interpCFromCC = create_interpolation(np.array([Nx_c, Ny_c]), np.array([Nx_cc, Ny_cc]))
@@ -314,15 +295,23 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
     def create_mesh_and_objective(self, Nx, Ny, xRange, yRange, ebcs, materialModel, quadRule, energy_neumann):
         mesh, disp0 = self.create_mesh_and_disp(Nx, Ny, xRange, yRange, lambda x : 0*x)
-        objective = create_objective(mesh, disp0, ebcs, energy_neumann, materialModel, quadRule)
-        return mesh, objective
+        objective, zero_dirichlet = create_objective(mesh, disp0, ebcs, energy_neumann, materialModel, quadRule)
+        return mesh, objective, zero_dirichlet
     
+    
+    def untestOrthogonalBases(self):
+        A = np.array([[0.3,0.2,1.2,0.2,0.4],[0.5,0.25,4,6,3.0],[0.25,0.125,2,3,1.5],[0,0,0,0,0]])
+        orthonormalA = construct_ortho_bases(A)
+        print(orthonormalA)
+
 
     def testMultilevelSolver(self):
         meshes = [self.mesh_cc, self.mesh_c]
         objectives = [self.objective_cc, self.objective_c]
         interpolations = [self.interpCFromCC]
         injections = [self.injectCFromCC]
+        zero_dirichlets = [self.zero_dirichlet_cc] #, self.zero_dirichlet_c]
+
         #meshes = [self.mesh_cc, self.mesh_c, self.mesh_f]
         #objectives = [self.objective_cc, self.objective_c, self.objective_f]
         #interpolations = [self.interpCFromCC, self.interpFFromC]
@@ -331,7 +320,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         restrictionNodes, restrictionWeights = self.construct_restrictions(interpolations)
         
         apply_interpolations = [partial(average_neighbors, coords=ms.coords, neighbors=ns) for ms,ns in zip(meshes[:-1],interpolations)]
-        apply_restrictions = [partial(apply_restriction, coords=ms.coords, restrictionNeighbors=ns, restrictionWeights=ws) for ms,ns,ws in zip(meshes[1:],restrictionNodes,restrictionWeights)]
+        apply_restrictions = [partial(apply_restriction, coords=ms.coords, restrictionNeighbors=ns, restrictionWeights=ws, zero_dirichlets=zd)
+                              for ms,ns,ws,zd in zip(meshes[1:],restrictionNodes,restrictionWeights,zero_dirichlets)]
         apply_injections = [partial(average_neighbors, coords=ms.coords, neighbors=ns) for ms,ns in zip(meshes[1:], injections)]
 
         multilevelObjectives = MultilevelObjectives(objectives = objectives,

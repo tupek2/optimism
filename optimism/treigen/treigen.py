@@ -24,6 +24,8 @@ def solve(A, b, Delta):
     if sig[0]>0 and norm(bv/sig) < Delta:
         return -np.linalg.solve(A,b) #-v@(bv/sig)
 
+    print("non trivial more sorensen solve")
+
     # if we get here, the solution must be on the tr boundary 
     
     sigScale = np.mean( np.abs(sig) )
