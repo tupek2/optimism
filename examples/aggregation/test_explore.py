@@ -74,7 +74,7 @@ def create_objective(mesh, dispGuessWithBC,
     obj.fieldShape = dispGuessWithBC.shape
 
     def zero_dirichlet(F):
-        return dofManager.create_field(dofManager.get_unknown_values(F.reshape(Ushape)), 0.0*Ubc)
+        return dofManager.create_field(dofManager.get_unknown_values(F.reshape(Ushape)), 0.0*Ubc).ravel()
 
     return obj, zero_dirichlet
 
@@ -108,12 +108,19 @@ class MultilevelObjectives:
 
 
 def construct_ortho_bases(listOfVectors):
+    if listOfVectors.shape[0] == 1:
+        return listOfVectors / np.linalg.norm(listOfVectors, axis=1)
+    
+    print('lofv shape = ', listOfVectors.shape)
     inputNorms = np.linalg.norm(listOfVectors, axis=1)
     R,_ = sp_linalg.rq(listOfVectors, mode='economic')
     #print('R = ', R)
     independentCols = np.abs(np.diag(R)) > 1e-10*inputNorms
     #print('ind cols = ', independentCols)
-    _,Q = sp_linalg.rq(listOfVectors[independentCols], mode='economic')
+    listOfIndependentVectors = listOfVectors[independentCols]
+    if listOfIndependentVectors.shape[0]==1:
+        return listOfIndependentVectors / np.linalg.norm(listOfIndependentVectors, axis=1)
+    _,Q = sp_linalg.rq(listOfIndependentVectors, mode='economic')
     return Q
 
 printThresh = -1
@@ -197,20 +204,19 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
 
     x_i = x_i_0.copy()
     o_i, gradient = objectiveObj.value_and_gradient(x_i)
-    v_i = g_i - gradient
-
-
+    v_i = (g_i - gradient)
     o_i = o_i + v_i @ x_i
 
+    g_i = gradient + v_i
+
     extraSearchDirection = gradient
-    #oldSubspaceDirections = []
 
     kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
     k = 0
     while k < kmax:
         k = k+1
 
-        subspaceDirections = [g_i, extraSearchDirection]
+        subspaceDirections = [g_i] #, extraSearchDirection]
 
         if i > 0:
             # condition 2.14:
@@ -344,12 +350,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         if testCoarse:
             pkl_file = open('data.pkl', 'rb')
             data = pickle.load(pkl_file)
-            #data = {'x': x_i_0, 'g': g_i}
             pkl_file.close()
 
             U_c = 0.5*solutions[0]
             delta = 1.0
-            dU_c = rmtr(multilevelObjectives, 0, data['x'], data['g'], delta, 1e-11, 1e-11, delta)
+            dU_c = rmtr(multilevelObjectives, 0, data['x'], 0.0*zero_dirichlets[0](data['g']), delta, 1e-11, 1e-11, delta)
             U_c = U_c + dU_c
 
             mesh_c = meshes[0]
