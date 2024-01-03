@@ -112,7 +112,8 @@ class MultilevelObjectives:
 
 def construct_ortho_bases(listOfVectors):
     if listOfVectors.shape[0] == 1:
-        return listOfVectors / np.linalg.norm(listOfVectors, axis=1)
+        nrm = np.linalg.norm(listOfVectors, axis=1)
+        return listOfVectors / nrm, nrm * np.ones((1,1))
     
     inputNorms = np.linalg.norm(listOfVectors, axis=1)
     R,_ = sp_linalg.rq(listOfVectors, mode='economic')
@@ -120,13 +121,14 @@ def construct_ortho_bases(listOfVectors):
     independentCols = np.abs(np.diag(R)) > 1e-10*inputNorms
     listOfIndependentVectors = listOfVectors[independentCols]
     if listOfIndependentVectors.shape[0]==1:
-        return listOfIndependentVectors / np.linalg.norm(listOfIndependentVectors, axis=1)
+        nrm = np.linalg.norm(listOfIndependentVectors, axis=1)
+        return listOfIndependentVectors / nrm, nrm * np.ones((1,1))
     
     R,Q = sp_linalg.rq(listOfIndependentVectors, mode='economic')
     #print('R', R, 'Q', Q)
     #print('RQ = ', R@Q)
     #print('orig = ', listOfVectors)
-    return Q
+    return Q,R
 
 printThresh = -1
 
@@ -210,7 +212,7 @@ def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, di
     else:
         def proj_orth_to_Hd(x): return x
 
-    return x, o, g, s, delta, proj_orth_to_Hd # I think s should be K ortho to all new directions?  So, maybe there is a better additional direction to try
+    return x, o, g, Hdirections, delta, proj_orth_to_Hd # I think s should be K ortho to all new directions?  So, maybe there is a better additional direction to try
 
 
 
@@ -243,8 +245,6 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     o_i = o_i + v_i @ x_i
     # g_i = gradient + v_i
 
-    
-
     #@timeme
     def diag_hess(x):
         return objectiveObj.diagonal_hessian(x)
@@ -252,7 +252,15 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     Kdiag = diag_hess(x_i)
     KdiagInv = np.where(Kdiag > 0.0, 1.0/Kdiag, 0.0)
 
-    extraSearchDirection = gradient
+    x_cg = x_i.copy()
+    g_cg = g_i.copy()
+    directionCg = -KdiagInv*g_cg # z
+    conjugateDirectionCg = directionCg
+    rDotzOld = g_cg@directionCg
+
+    if i > printThresh: print(indent,'cg residual norm at level',i, 'iteration',0,'=', np.linalg.norm(g_cg), np.linalg.norm(objectiveObj.gradient(x_cg)+v_i))
+
+    #extraSearchDirection = gradient
 
     #kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
     kmax = 3 * np.sum( np.abs(g_i) > 0.0 )
@@ -260,7 +268,8 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     while k < kmax:
         k = k+1
 
-        subspaceDirections = [KdiagInv*g_i, g_i]
+        #subspaceDirections = [conjugateDirectionCg, x_cg-x_i, KdiagInv*g_i, g_i]
+        subspaceDirections = [-KdiagInv*g_i, -g_i, x_cg-x_i, conjugateDirectionCg]
 
         if i > 0:
             # condition 2.14:
@@ -276,23 +285,45 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
                 subspaceDirections.append(multilevelObjectives.interpolations[i-1](s))
 
         subspaceDirections = np.array(subspaceDirections)
-        subspaceDirections = project_ortho(subspaceDirections)
+        # subspaceDirections = project_ortho(subspaceDirections) # MRT, not sure if we want this now?
 
         checkOrtho = False
         if checkOrtho:
             dotProds = objectiveObj.hessian_vec_mult_rhs(x_i, subspaceDirections) @ oldDirections.T
             print('dot prods = ', dotProds)
 
-        directions = construct_ortho_bases(subspaceDirections)
+        directions, R = construct_ortho_bases(subspaceDirections)
 
-        oldDirections = directions.copy() 
+        if checkOrtho:
+            oldDirections = directions.copy() 
 
-        #print('direction d = ', directions)
-        x_i, o_i, g_i, extraSearchDirection, delta, project_ortho = solve_subproblem(multilevelObjectives, v_i, x_i, o_i, g_i, directions, delta, i)
+        x_i, o_i, g_i, Hdirections, delta, project_ortho = solve_subproblem(multilevelObjectives, v_i, x_i, o_i, g_i, directions, delta, i)
+
+        Hp = (R@Hdirections)[-1] # MRT, maybe work considering a higher precision way to do this
+
+        #Hp2 = objectiveObj.hessian_vec(x_i, conjugateDirectionCg)
+        #Hp = objectiveObj.hessian_vec(x_i, conjugateDirectionCg)
+        #print('hps = ', Hp1, '\n', Hp, '\nR = ',R)
+
+        pAp = conjugateDirectionCg@Hp
+        alpha = -g_cg@directionCg / pAp if pAp > 0 else 0.0 # think of something to do when negative eigenvalue found
+
+        x_cg = x_cg + alpha * conjugateDirectionCg
+        g_cg = g_cg + alpha * Hp
+
+        directionCg = -KdiagInv*g_cg # z
+        rDotz = g_cg @ directionCg
+        beta = rDotz / rDotzOld
+        rDotzOld = rDotz
+
+        conjugateDirectionCg = directionCg + beta * conjugateDirectionCg
+
+        #pAp = 
 
         residualNorm = np.linalg.norm(g_i)
 
         if i > printThresh: print(indent,'residual norm at level',i, 'iteration',k,'=', residualNorm)
+        if i > printThresh: print(indent,'cg residual norm at level',i, 'iteration',k,'=', np.linalg.norm(g_cg), np.linalg.norm(objectiveObj.gradient(x_cg)+v_i))
         if residualNorm < eps_g:
             print(indent,'converged at level',i)
             return x_i - x_i_0
