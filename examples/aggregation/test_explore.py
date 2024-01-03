@@ -301,10 +301,6 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
 
         Hp = (R@Hdirections)[-1] # MRT, maybe work considering a higher precision way to do this
 
-        #Hp2 = objectiveObj.hessian_vec(x_i, conjugateDirectionCg)
-        #Hp = objectiveObj.hessian_vec(x_i, conjugateDirectionCg)
-        #print('hps = ', Hp1, '\n', Hp, '\nR = ',R)
-
         pAp = conjugateDirectionCg@Hp
         alpha = -g_cg@directionCg / pAp if pAp > 0 else 0.0 # think of something to do when negative eigenvalue found
 
@@ -317,8 +313,6 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
         rDotzOld = rDotz
 
         conjugateDirectionCg = directionCg + beta * conjugateDirectionCg
-
-        #pAp = 
 
         residualNorm = np.linalg.norm(g_i)
 
