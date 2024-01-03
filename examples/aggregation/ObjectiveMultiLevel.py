@@ -14,6 +14,9 @@ class Objective:
 
         self.grad_p = jit(grad(f,1))
         
+        #self.diagonal_hess = jit(lambda x, p: vmap(grad(lambda xi,i : self.grad_x(x.at[i].set(xi),p)[i], 0))(x,np.arange(len(x))))
+        self.diagonal_hess = jit(lambda x, p: vmap(hessian(lambda xi,i : f(x.at[i].set(xi),p), 0))(x,np.arange(len(x))))
+
         self.hess_vec = jit(lambda x, p, vx:
                             jvp(lambda z: self.grad_x(z,p), (x,), (vx,))[1])
 
@@ -77,7 +80,10 @@ class Objective:
     
     def vec_hessian(self, x, vx):
         return self.vec_hess(x, self.p, vx)
-                              
+
+    def diagonal_hessian(self, x):
+        return self.diagonal_hess(x, self.p)
+
     def hessian(self, x):
         return self.hess(x, self.p)
 

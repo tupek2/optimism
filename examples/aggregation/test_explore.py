@@ -9,6 +9,9 @@ from optimism import QuadratureRule
 from optimism import FunctionSpace
 from optimism import Mechanics
 from optimism.treigen import treigen
+from optimism.treigen.treigen import SubSpaceStatus
+from optimism.Timer import timeme
+
 from Plotting import output_mesh_and_fields
 from optimism.material import LinearElastic as MatModel
 import optimism.EquationSolver as EqSolver
@@ -17,7 +20,6 @@ from ObjectiveMultiLevel import Objective
 from ObjectiveMultiLevel import Params
 
 import pickle
-
 
 from chex._src.dataclass import dataclass
 from chex._src import pytypes
@@ -105,27 +107,30 @@ class MultilevelObjectives:
     restrictions : list
     interpolations : list
     injections : list
+    zero_dirichlets : list
 
 
 def construct_ortho_bases(listOfVectors):
     if listOfVectors.shape[0] == 1:
         return listOfVectors / np.linalg.norm(listOfVectors, axis=1)
     
-    print('lofv shape = ', listOfVectors.shape)
     inputNorms = np.linalg.norm(listOfVectors, axis=1)
     R,_ = sp_linalg.rq(listOfVectors, mode='economic')
-    #print('R = ', R)
+    #print('orig R = ', R)
     independentCols = np.abs(np.diag(R)) > 1e-10*inputNorms
-    #print('ind cols = ', independentCols)
     listOfIndependentVectors = listOfVectors[independentCols]
     if listOfIndependentVectors.shape[0]==1:
         return listOfIndependentVectors / np.linalg.norm(listOfIndependentVectors, axis=1)
-    _,Q = sp_linalg.rq(listOfIndependentVectors, mode='economic')
+    
+    R,Q = sp_linalg.rq(listOfIndependentVectors, mode='economic')
+    #print('R', R, 'Q', Q)
+    #print('RQ = ', R@Q)
+    #print('orig = ', listOfVectors)
     return Q
 
 printThresh = -1
 
-def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, level):
+def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, directions, delta, level):
 
     # fixed settings for now
     eta1 = 0.05
@@ -136,27 +141,42 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
 
     indent = " "*2*(2-level)
 
-    Hdirections = objectiveObj.hessian_vec_mult_rhs(x, directions)
+    objectiveObj : Objective = multilevelObjectives.objectives[level]
+
+    @timeme
+    def h_x(directions):
+        return objectiveObj.hessian_vec_mult_rhs(x, directions)
+
+    Hdirections = h_x(directions)
 
     reducedH = np.einsum(directions, [0,1], Hdirections, [2,1], [0,2])
     reducedG = directions@g
 
+    subSpaceStatus = SubSpaceStatus.NonConvex
+
     haveSufficientDecrease = False
     while not haveSufficientDecrease:
-        alphas = treigen.solve(reducedH, reducedG, delta)
+        alphas, subSpaceStatus = treigen.solve(reducedH, reducedG, delta)
+
+        #print(alphas, delta, subSpaceStatus)
+
+        if subSpaceStatus!=SubSpaceStatus.ConvexInside: # check that we are satisfying trust region as expected
+            assert( np.abs(delta - np.linalg.norm(alphas)) < 1e-12 )
 
         if level > printThresh: print(indent, 'alpha = ', alphas)
 
-        # delta from paper
         modelEnergyDrop = -0.5 * alphas @ (reducedH @ alphas) - alphas @ reducedG
+
+        s = alphas@directions
+        xTrial = x + s
+
+        if subSpaceStatus!=SubSpaceStatus.ConvexInside: # check that we are satisfying trust region as expected
+            assert( np.abs(delta - np.linalg.norm(s)) < 1e-12 )
 
         if modelEnergyDrop <= 0: 
             print(indent, "energy cannot drop any more, maybe call this converged?")
             print(indent, reducedH, reducedG, alphas)
-            return x, o, g, g, delta
-
-        s = alphas@directions
-        xTrial = x + s
+            continue
 
         oTrial, gTrial = objectiveObj.value_and_gradient(xTrial)
         oTrial = oTrial + v @ xTrial
@@ -165,7 +185,7 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
 
         if level > printThresh: print(indent, 'model drop =', modelEnergyDrop, 'actual drop=', actualEnergyDrop, 'predicted energy=', oTrial)
 
-        rho = (actualEnergyDrop + 1e-10) / (modelEnergyDrop + 1e-10)
+        rho = (actualEnergyDrop + 1e-10) / (modelEnergyDrop + 1e-10) # MRT, this 1e-10 should probably be relative to initial energy values?
 
         deltaOld = delta
         if not rho >= eta2:  # write it this way to handle NaNs
@@ -179,17 +199,32 @@ def solve_subproblem(objectiveObj : Objective, v, x, o, g, directions, delta, le
         if willAccept:
             o = oTrial
             g = gTrial
-            dx = xTrial - x
             x = xTrial
             haveSufficientDecrease = True
 
-    return x, o, g, dx, delta
+    if subSpaceStatus == SubSpaceStatus.ConvexInside: # MRT, maybe also ConvexOutside, what about pseudo inv for NonConvex
+        def proj_orth_to_Hd(x):
+            zTx = np.einsum(Hdirections, [0,2], x, [1,2], [0,1])
+            HinvZTx = np.linalg.solve(reducedH, zTx)
+            return x - np.einsum(directions, [1,0], HinvZTx, [1,2], [2,0])
+    else:
+        def proj_orth_to_Hd(x): return x
+
+    return x, o, g, s, delta, proj_orth_to_Hd # I think s should be K ortho to all new directions?  So, maybe there is a better additional direction to try
+
 
 
 def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, eps_g, eps_d, delta_s):
     if i > printThresh: print('starting at ', i)
-    
     indent = " "*2*(2-i)
+    
+    residualNorm = np.linalg.norm(g_i)
+    if residualNorm < eps_g:
+        print(indent,'already converged at level',i)
+        return 0.0*x_i_0
+
+    project_ortho = lambda x : x
+    oldDirections = np.zeros((1,len(x_i_0)))
 
     if False and i==0:
         data = {'x': x_i_0, 'g': g_i}
@@ -206,17 +241,26 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     o_i, gradient = objectiveObj.value_and_gradient(x_i)
     v_i = (g_i - gradient)
     o_i = o_i + v_i @ x_i
+    # g_i = gradient + v_i
 
-    g_i = gradient + v_i
+    
+
+    #@timeme
+    def diag_hess(x):
+        return objectiveObj.diagonal_hessian(x)
+
+    Kdiag = diag_hess(x_i)
+    KdiagInv = np.where(Kdiag > 0.0, 1.0/Kdiag, 0.0)
 
     extraSearchDirection = gradient
 
-    kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
+    #kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
+    kmax = 3 * np.sum( np.abs(g_i) > 0.0 )
     k = 0
     while k < kmax:
         k = k+1
 
-        subspaceDirections = [g_i] #, extraSearchDirection]
+        subspaceDirections = [KdiagInv*g_i, g_i]
 
         if i > 0:
             # condition 2.14:
@@ -231,8 +275,20 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
                 s = rmtr(multilevelObjectives, i-1, x_im1, Rg, delta, eps_g, eps_d, delta_s)
                 subspaceDirections.append(multilevelObjectives.interpolations[i-1](s))
 
-        directions = np.array(construct_ortho_bases(np.array(subspaceDirections)))
-        x_i, o_i, g_i, extraSearchDirection, delta = solve_subproblem(objectiveObj, v_i, x_i, o_i, g_i, directions, delta, i)
+        subspaceDirections = np.array(subspaceDirections)
+        subspaceDirections = project_ortho(subspaceDirections)
+
+        checkOrtho = False
+        if checkOrtho:
+            dotProds = objectiveObj.hessian_vec_mult_rhs(x_i, subspaceDirections) @ oldDirections.T
+            print('dot prods = ', dotProds)
+
+        directions = construct_ortho_bases(subspaceDirections)
+
+        oldDirections = directions.copy() 
+
+        #print('direction d = ', directions)
+        x_i, o_i, g_i, extraSearchDirection, delta, project_ortho = solve_subproblem(multilevelObjectives, v_i, x_i, o_i, g_i, directions, delta, i)
 
         residualNorm = np.linalg.norm(g_i)
 
@@ -333,7 +389,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         multilevelObjectives = MultilevelObjectives(objectives = objectives,
                                                     restrictions = apply_restrictions,
                                                     interpolations = apply_interpolations,
-                                                    injections = apply_injections)
+                                                    injections = apply_injections,
+                                                    zero_dirichlets = zero_dirichlets)
 
         numLevels = len(objectives)
 
@@ -353,8 +410,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             pkl_file.close()
 
             U_c = 0.5*solutions[0]
-            delta = 1.0
-            dU_c = rmtr(multilevelObjectives, 0, data['x'], 0.0*zero_dirichlets[0](data['g']), delta, 1e-11, 1e-11, delta)
+            delta = 3.0
+            dU_c = rmtr(multilevelObjectives, 0, data['x'], zero_dirichlets[0](data['g']), delta, 1e-11, 1e-11, delta)
             U_c = U_c + dU_c
 
             mesh_c = meshes[0]
@@ -362,7 +419,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         if testFine:
             U_f = solutions[-1]
-            delta = 1.0
+            delta = 3.0
             dU_f = rmtr(multilevelObjectives, numLevels-1, U_f, objectives[numLevels-1].gradient(U_f), delta, 1e-11, 1e-11, delta)
             U_f = U_f + dU_f
 
