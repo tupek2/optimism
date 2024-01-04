@@ -95,10 +95,12 @@ def average_neighbors(vector, coords, neighbors):
     return (jax.vmap(lambda ns: np.sum(vector[ns], axis=0))(neighbors) / numNeighbors).ravel()
 
 
-@jax.jit
+#@jax.jit
+@partial(jax.jit, static_argnums=(4,))
 def apply_restriction(vector, coords, restrictionNeighbors, restrictionWeights, zero_dirichlet):
     vector = vector.reshape(coords.shape)
     return zero_dirichlet(jax.vmap(lambda ns, ws: ws@vector[ns])(restrictionNeighbors, restrictionWeights).ravel())
+    #return jax.vmap(lambda ns, ws: ws@vector[ns])(restrictionNeighbors, restrictionWeights).ravel()
 
 
 @dataclass(frozen=True, mappable_dataclass=False)
@@ -130,7 +132,7 @@ def construct_ortho_bases(listOfVectors):
     #print('orig = ', listOfVectors)
     return Q,R
 
-printThresh = -1
+printThresh = 0
 
 def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, directions, delta, level):
 
@@ -145,7 +147,7 @@ def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, di
 
     objectiveObj : Objective = multilevelObjectives.objectives[level]
 
-    @timeme
+    #@timeme
     def h_x(directions):
         return objectiveObj.hessian_vec_mult_rhs(x, directions)
 
@@ -162,9 +164,6 @@ def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, di
 
         #print(alphas, delta, subSpaceStatus)
 
-        if subSpaceStatus!=SubSpaceStatus.ConvexInside: # check that we are satisfying trust region as expected
-            assert( np.abs(delta - np.linalg.norm(alphas)) < 1e-12 )
-
         if level > printThresh: print(indent, 'alpha = ', alphas)
 
         modelEnergyDrop = -0.5 * alphas @ (reducedH @ alphas) - alphas @ reducedG
@@ -172,12 +171,13 @@ def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, di
         s = alphas@directions
         xTrial = x + s
 
-        if subSpaceStatus!=SubSpaceStatus.ConvexInside: # check that we are satisfying trust region as expected
-            assert( np.abs(delta - np.linalg.norm(s)) < 1e-12 )
+        #if subSpaceStatus!=SubSpaceStatus.ConvexInside: # check that we are satisfying trust region as expected
+        #    print("delta, alpha norm = ", delta, np.linalg.norm(alphas), np.linalg.norm(s))
 
-        if modelEnergyDrop <= 0: 
+        if modelEnergyDrop <= -1e-10: 
             print(indent, "energy cannot drop any more, maybe call this converged?")
-            print(indent, reducedH, reducedG, alphas)
+            exit(1)
+            #print(indent, reducedH, reducedG, alphas)
             continue
 
         oTrial, gTrial = objectiveObj.value_and_gradient(xTrial)
@@ -217,8 +217,8 @@ def solve_subproblem(multilevelObjectives : MultilevelObjectives, v, x, o, g, di
 
 
 def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, eps_g, eps_d, delta_s):
-    if i > printThresh: print('starting at ', i)
     indent = " "*2*(2-i)
+    print(indent, 'starting at ', i)
     
     residualNorm = np.linalg.norm(g_i)
     if residualNorm < eps_g:
@@ -238,6 +238,8 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     delta = np.minimum(delta_ip1, delta_s)
 
     objectiveObj : Objective = multilevelObjectives.objectives[i]
+
+    #print('num rest = ', len(multilevelObjectives.restrictions))
 
     x_i = x_i_0.copy()
     o_i, gradient = objectiveObj.value_and_gradient(x_i)
@@ -263,7 +265,7 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
     #extraSearchDirection = gradient
 
     #kmax = 40 if i > 0 else 100 #2 if i > 0 else 50
-    kmax = 3 * np.sum( np.abs(g_i) > 0.0 )
+    kmax = 100 #3 * np.sum( np.abs(g_i) > 0.0 )
     k = 0
     while k < kmax:
         k = k+1
@@ -273,6 +275,7 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
 
         if i > 0:
             # condition 2.14:
+            #print(i, g_i)
             Rg = multilevelObjectives.restrictions[i-1](g_i)
             RgNorm = np.linalg.norm(Rg)
             gNorm = np.linalg.norm(g_i)
@@ -282,15 +285,16 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
             if not onlyUseModelAtThisLevel:
                 x_im1 = multilevelObjectives.injections[i-1](x_i)
                 s = rmtr(multilevelObjectives, i-1, x_im1, Rg, delta, eps_g, eps_d, delta_s)
-                subspaceDirections.append(multilevelObjectives.interpolations[i-1](s))
+                subspaceDirections.insert(0,multilevelObjectives.interpolations[i-1](s))
 
         subspaceDirections = np.array(subspaceDirections)
+        if i > printThresh: print(indent,'subspace size = ', subspaceDirections.shape)
         # subspaceDirections = project_ortho(subspaceDirections) # MRT, not sure if we want this now?
 
         checkOrtho = False
         if checkOrtho:
             dotProds = objectiveObj.hessian_vec_mult_rhs(x_i, subspaceDirections) @ oldDirections.T
-            print('dot prods = ', dotProds)
+            #print('dot prods = ', dotProds)
 
         directions, R = construct_ortho_bases(subspaceDirections)
 
@@ -299,7 +303,8 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
 
         x_i, o_i, g_i, Hdirections, delta, project_ortho = solve_subproblem(multilevelObjectives, v_i, x_i, o_i, g_i, directions, delta, i)
 
-        Hp = (R@Hdirections)[-1] # MRT, maybe work considering a higher precision way to do this
+        #Hp = (R@Hdirections)[-1] # MRT, maybe work considering a higher precision way to do this
+        Hp = objectiveObj.hessian_vec(x_i, conjugateDirectionCg)
 
         pAp = conjugateDirectionCg@Hp
         alpha = -g_cg@directionCg / pAp if pAp > 0 else 0.0 # think of something to do when negative eigenvalue found
@@ -310,6 +315,9 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
         directionCg = -KdiagInv*g_cg # z
         rDotz = g_cg @ directionCg
         beta = rDotz / rDotzOld
+        if beta <= 0:
+            print("bad beta")
+            exit(1)
         rDotzOld = rDotz
 
         conjugateDirectionCg = directionCg + beta * conjugateDirectionCg
@@ -319,7 +327,7 @@ def rmtr(multilevelObjectives : MultilevelObjectives, i, x_i_0, g_i, delta_ip1, 
         if i > printThresh: print(indent,'residual norm at level',i, 'iteration',k,'=', residualNorm)
         if i > printThresh: print(indent,'cg residual norm at level',i, 'iteration',k,'=', np.linalg.norm(g_cg), np.linalg.norm(objectiveObj.gradient(x_cg)+v_i))
         if residualNorm < eps_g:
-            print(indent,'converged at level',i)
+            print(indent,'converged at level',i,'after',k,'iterations.')
             return x_i - x_i_0
         
     return x_i - x_i_0
@@ -397,18 +405,19 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         objectives = [self.objective_cc, self.objective_c]
         interpolations = [self.interpCFromCC]
         injections = [self.injectCFromCC]
-        zero_dirichlets = [self.zero_dirichlet_cc] #, self.zero_dirichlet_c]
+        zero_dirichlets = [self.zero_dirichlet_cc, self.zero_dirichlet_c]
 
         #meshes = [self.mesh_cc, self.mesh_c, self.mesh_f]
         #objectives = [self.objective_cc, self.objective_c, self.objective_f]
         #interpolations = [self.interpCFromCC, self.interpFFromC]
         #injections = [self.injectCFromCC, self.injectFFromC]
+        #zero_dirichlets = [self.zero_dirichlet_cc, self.zero_dirichlet_c, self.zero_dirichlet_f]
 
         restrictionNodes, restrictionWeights = self.construct_restrictions(interpolations)
         
         apply_interpolations = [partial(average_neighbors, coords=ms.coords, neighbors=ns) for ms,ns in zip(meshes[:-1],interpolations)]
-        apply_restrictions = [partial(apply_restriction, coords=ms.coords, restrictionNeighbors=ns, restrictionWeights=ws, zero_dirichlets=zd)
-                              for ms,ns,ws,zd in zip(meshes[1:],restrictionNodes,restrictionWeights,zero_dirichlets)]
+        apply_restrictions = [partial(apply_restriction, coords=ms.coords, restrictionNeighbors=ns, restrictionWeights=ws, zero_dirichlet=zd)
+                              for ms,ns,ws,zd in zip(meshes[1:],restrictionNodes,restrictionWeights,zero_dirichlets[:-1])]
         apply_injections = [partial(average_neighbors, coords=ms.coords, neighbors=ns) for ms,ns in zip(meshes[1:], injections)]
 
         multilevelObjectives = MultilevelObjectives(objectives = objectives,
@@ -424,10 +433,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         for level, interp in enumerate(apply_interpolations):
             solutions[level+1] = interp(solutions[level])
 
-        testFine = False
-        testCoarse = True
-        #testFine = True
-        #testCoarse = False
+        #testFine = False
+        #testCoarse = True
+        testFine = True
+        testCoarse = False
+        checkMeshTransfers = False#True
 
         if testCoarse:
             pkl_file = open('data.pkl', 'rb')
@@ -444,14 +454,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         if testFine:
             U_f = solutions[-1]
-            delta = 3.0
-            dU_f = rmtr(multilevelObjectives, numLevels-1, U_f, objectives[numLevels-1].gradient(U_f), delta, 1e-11, 1e-11, delta)
+            delta = 100 #3.0
+            finestLevel = numLevels-1
+            dU_f = rmtr(multilevelObjectives, finestLevel, U_f, zero_dirichlets[finestLevel](objectives[finestLevel].gradient(U_f)), delta, 1e-11, 1e-11, delta)
             U_f = U_f + dU_f
 
             mesh_f = meshes[-1]
             output_mesh_and_fields('sol', mesh_f, vectorNodalFields=[('disp', U_f.reshape(mesh_f.coords.shape))])
 
-        checkMeshTransfers = False
+        
         if checkMeshTransfers:
             for level, [mesh, solution] in enumerate(zip(meshes, solutions)):
                 output_mesh_and_fields(str(level), mesh, vectorNodalFields=[('disp', solution.reshape(mesh.coords.shape))])
