@@ -147,6 +147,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Hg2 = linOp.apply(g.ravel())
         print('hv = ', np.linalg.norm(Hg-Hg2))
       
+        
+
         # consider how to do initial guess. hard to be robust without warm start
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
