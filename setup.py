@@ -6,6 +6,7 @@ setuptools.setup(
     author="Michael Tupek and Brandon Talamini",
     author_email='talamini1@llnl.gov', # todo: make an email list
     install_requires=['jax[cpu]',
+                      'chex',
                       'scipy',
                       'matplotlib', # this is not strictly necessary
                       'netcdf4',
