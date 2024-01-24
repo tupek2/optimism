@@ -78,6 +78,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         props = {'elastic modulus': E,
                  'poisson ratio': nu,
                  'version': 'coupled'}
+        
         self.materialModel = MatModel.create_material_model_functions(props)
         mcxFuncs = Mechanics.create_mechanics_functions(self.fs, "plane strain", self.materialModel)
         self.compute_energy = mcxFuncs.compute_strain_energy
@@ -108,31 +109,14 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
-        partitionElemField, polyElems, polyNodes, nodesToColors, activeNodes = \
-          self.construct_aggregates(self.numParts, ['bottom','top','right','left'], [])
+        U = dofManager.create_field(0.0 * dofManager.get_unknown_values(self.dispTarget), dofManager.get_bc_values(self.dispTarget))
 
-        #def set_status(n):
-        nodeStatus = -np.ones_like(activeNodes, dtype=np.int64)
-        numActive = np.count_nonzero(activeNodes)
-        nodeStatus = nodeStatus.at[activeNodes==1].set(np.arange(numActive))
-
-        colorCount = np.array([len(nodesToColors[s]) for s in nodesToColors])
-        inactive = activeNodes!=1
-        nodeStatus = nodeStatus.at[inactive].set(colorCount[inactive]*nodeStatus[inactive])
-
-        dofStatus = np.stack((nodeStatus,nodeStatus), axis=1)
-        dofStatus = dofStatus.at[dofManager.isBc].set(DIRICHLET_INDEX).ravel()
-
-        linOp = TupekPrecond.LinearOperatorSym(dofStatus, DIRICHLET_INDEX)
-
-        U = self.dispTarget[:]
+        partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = self.construct_aggregations(dofManager, U)
 
         poly_energy = lambda pU, pNodes, pElems : self.fine_poly_energy(pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
 
-        polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
-        polyElems = [np.array(list(polyElems[index]), dtype=np.int64) for index in polyElems]
-
+        linOp = TupekPrecond.LinearOperatorSym(dofStatus, DIRICHLET_INDEX)
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
             nDofs = pU.size
@@ -143,17 +127,48 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         linOp.finalize()
 
         g = self.compute_gradient(U, self.internals)
-        Hg = self.compute_hessvec(U, self.internals, g).ravel()
-        Hg2 = linOp.apply(g.ravel())
-        print('hv = ', np.linalg.norm(Hg-Hg2))
-      
-        
+
+        print('gnorm in = ', np.linalg.norm(g))
+
+        g = g.at[dofManager.isBc].set(0.0).ravel()
+        dU = 0.0*U.ravel()
+        leftMost = g.copy()
+
+        delta = 1000.0
+        #
+        settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
+        TupekPrecond.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
+
+        U = U + dU.reshape(U.shape)
+
+        #TupekPrecond.
 
         # consider how to do initial guess. hard to be robust without warm start
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
                                scalarNodalFields = [('active', activeNodes)],
                                vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget)])
+
+
+
+    def construct_aggregations(self, dofManager, U):
+        partitionElemField, polyElems, polyNodes, nodesToColors, activeNodes = \
+          self.construct_aggregates(self.numParts, ['bottom','top','right','left'], [])
+
+        nodeStatus = -np.ones_like(activeNodes, dtype=np.int64)
+        numActive = np.count_nonzero(activeNodes)
+        nodeStatus = nodeStatus.at[activeNodes==1].set(np.arange(numActive))
+
+        colorCount = np.array([len(nodesToColors[s]) for s in nodesToColors])
+        inactive = activeNodes!=1
+        nodeStatus = nodeStatus.at[inactive].set(colorCount[inactive]*nodeStatus[inactive])
+
+        dofStatus = np.stack((nodeStatus,nodeStatus), axis=1)
+        dofStatus = dofStatus.at[dofManager.isBc].set(DIRICHLET_INDEX).ravel()
+  
+        polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
+        polyElems = [np.array(list(polyElems[index]), dtype=np.int64) for index in polyElems]
+        return partitionElemField,activeNodes,polyElems,polyNodes,dofStatus
 
 
     # geometric boundaries must cover the entire boundary.
