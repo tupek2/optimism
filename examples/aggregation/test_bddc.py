@@ -53,9 +53,9 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        self.Nx = 7
-        self.Ny = 5
-        self.numParts = 3
+        self.Nx = 9
+        self.Ny = 6
+        self.numParts = 5
 
         #self.Nx = 18
         #self.Ny = 10
@@ -113,6 +113,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = self.construct_aggregations(dofManager, U)
 
+        print('dof st = ', dofStatus)
+
         poly_energy = lambda pU, pNodes, pElems : self.fine_poly_energy(pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
 
@@ -135,37 +137,40 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         leftMost = g.copy()
 
         delta = 1000.0
-        #
-        settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
+        #settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
+        settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.BDDC)
         TupekPrecond.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
 
         U = U + dU.reshape(U.shape)
-
-        #TupekPrecond.
 
         # consider how to do initial guess. hard to be robust without warm start
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
                                scalarNodalFields = [('active', activeNodes)],
-                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget)])
-
+                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),('dof_status', dofStatus.reshape(U.shape))])
 
 
     def construct_aggregations(self, dofManager, U):
         partitionElemField, polyElems, polyNodes, nodesToColors, activeNodes = \
           self.construct_aggregates(self.numParts, ['bottom','top','right','left'], [])
 
-        nodeStatus = -np.ones_like(activeNodes, dtype=np.int64)
-        numActive = np.count_nonzero(activeNodes)
-        nodeStatus = nodeStatus.at[activeNodes==1].set(np.arange(numActive))
+        colorCount = np.array([len(nodesToColors[s]) for s in range(len(activeNodes))])
+        isActive = colorCount > 1 # activeNodes==1
 
-        colorCount = np.array([len(nodesToColors[s]) for s in nodesToColors])
-        inactive = activeNodes!=1
-        nodeStatus = nodeStatus.at[inactive].set(colorCount[inactive]*nodeStatus[inactive])
+        nodeStatus = -np.ones_like(activeNodes, dtype=np.int64)
+        whereActive = np.where(isActive)[0]
+        nodeStatus = nodeStatus.at[whereActive].set(0)
+
+        whereInactive = np.where(~isActive)[0]
+        self.assertTrue( np.max(colorCount[whereInactive]) < 3 ) # because we are 2D for now
+        nodeStatus = nodeStatus.at[whereInactive].set(colorCount[whereInactive]*nodeStatus[whereInactive])
 
         dofStatus = np.stack((nodeStatus,nodeStatus), axis=1)
         dofStatus = dofStatus.at[dofManager.isBc].set(DIRICHLET_INDEX).ravel()
   
+        whereGlobal = np.where(dofStatus>=0)[0]
+        dofStatus = dofStatus.at[whereGlobal].set(np.arange(len(whereGlobal)))
+
         polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
         polyElems = [np.array(list(polyElems[index]), dtype=np.int64) for index in polyElems]
         return partitionElemField,activeNodes,polyElems,polyNodes,dofStatus
