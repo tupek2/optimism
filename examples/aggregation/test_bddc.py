@@ -113,7 +113,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = self.construct_aggregations(dofManager, U)
 
-        print('dof st = ', dofStatus)
+        # print('dof st = ', dofStatus)
 
         poly_energy = lambda pU, pNodes, pElems : self.fine_poly_energy(pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
@@ -137,8 +137,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         leftMost = g.copy()
 
         delta = 1000.0
-        settings = TupekPrecond.TrustRegionSettings(1e-11, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
-        #settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.BDDC)
+        #settings = TupekPrecond.TrustRegionSettings(1e-11, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
+        settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.BDDC)
         TupekPrecond.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
 
         U = U + dU.reshape(U.shape)
@@ -157,7 +157,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           self.construct_aggregates(self.numParts, ['bottom','top','right','left'], [])
 
         colorCount = np.array([len(nodesToColors[s]) for s in range(len(activeNodes))])
-        isActive = colorCount > 1 # activeNodes==1
+        isActive = colorCount > 2 # activeNodes==1
 
         nodeStatus = -np.ones_like(activeNodes, dtype=np.int64)
         whereActive = np.where(isActive)[0]
