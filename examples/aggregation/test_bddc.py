@@ -137,11 +137,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         leftMost = g.copy()
 
         delta = 1000.0
-        #settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
-        settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.BDDC)
+        settings = TupekPrecond.TrustRegionSettings(1e-11, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
+        #settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.BDDC)
         TupekPrecond.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
 
         U = U + dU.reshape(U.shape)
+
+        self.assertArrayNear(U, self.dispTarget, 12)
 
         # consider how to do initial guess. hard to be robust without warm start
         output_mesh_and_fields('patch', self.mesh, 
