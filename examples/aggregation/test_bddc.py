@@ -31,7 +31,7 @@ import os
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '/Users/tupek2/dev/agglomerationpreconditioner/python'))
-import TupekPrecond
+import Quilts
 
 DIRICHLET_INDEX = np.iinfo(np.int32).min
 
@@ -53,9 +53,9 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        self.Nx = 9
-        self.Ny = 6
-        self.numParts = 5
+        self.Nx = 30
+        self.Ny = 20
+        self.numParts = 60
 
         #self.Nx = 18
         #self.Ny = 10
@@ -118,7 +118,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         poly_energy = lambda pU, pNodes, pElems : self.fine_poly_energy(pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
 
-        linOp = TupekPrecond.LinearOperatorSym(dofStatus, DIRICHLET_INDEX)
+        linOp = Quilts.LinearOperatorSym(dofStatus, True, DIRICHLET_INDEX)
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
             nDofs = pU.size
@@ -137,9 +137,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         leftMost = g.copy()
 
         delta = 1000.0
-        #settings = TupekPrecond.TrustRegionSettings(1e-11, 200, TupekPrecond.TrustRegionSettings.DIAGONAL)
-        settings = TupekPrecond.TrustRegionSettings(1e-10, 200, TupekPrecond.TrustRegionSettings.BDDC)
-        TupekPrecond.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
+        #settings = Quilts.TrustRegionSettings(1e-11, 200, Quilts.TrustRegionSettings.DIAGONAL)
+        settings = Quilts.TrustRegionSettings(1e-11, 200, Quilts.TrustRegionSettings.BDDC)
+        #settings = Quilts.TrustRegionSettings(1e-11, 200, Quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
+        Quilts.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
 
         U = U + dU.reshape(U.shape)
 
@@ -171,6 +172,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         dofStatus = dofStatus.at[dofManager.isBc].set(DIRICHLET_INDEX).ravel()
   
         whereGlobal = np.where(dofStatus>=0)[0]
+        print('num global dofs = ', whereGlobal)
         dofStatus = dofStatus.at[whereGlobal].set(np.arange(len(whereGlobal)))
 
         polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
