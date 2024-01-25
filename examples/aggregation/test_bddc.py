@@ -31,7 +31,7 @@ import os
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '/Users/tupek2/dev/agglomerationpreconditioner/python'))
-import Quilts
+import quilts
 
 DIRICHLET_INDEX = np.iinfo(np.int32).min
 
@@ -118,7 +118,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         poly_energy = lambda pU, pNodes, pElems : self.fine_poly_energy(pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
 
-        linOp = Quilts.LinearOperatorSym(dofStatus, True, DIRICHLET_INDEX)
+        linOp = quilts.LinearOperatorSym(dofStatus, True, DIRICHLET_INDEX)
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
             nDofs = pU.size
@@ -137,10 +137,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         leftMost = g.copy()
 
         delta = 1000.0
-        #settings = Quilts.TrustRegionSettings(1e-11, 200, Quilts.TrustRegionSettings.DIAGONAL)
-        settings = Quilts.TrustRegionSettings(1e-11, 200, Quilts.TrustRegionSettings.BDDC)
-        #settings = Quilts.TrustRegionSettings(1e-11, 200, Quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
-        Quilts.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
+        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
+        settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
+        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
+        quilts.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
 
         U = U + dU.reshape(U.shape)
 
