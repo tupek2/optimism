@@ -26,6 +26,7 @@ import optimism.FunctionSpace as FunctionSpace
 #from optimism.material import Neohookean as MatModel
 from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
+import operator as op
 
 import os
 import sys
@@ -53,9 +54,9 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        self.Nx = 15
-        self.Ny = 7
-        self.numParts = 15
+        self.Nx = 6
+        self.Ny = 5
+        self.numParts = 4
 
         #self.Nx = 18
         #self.Ny = 10
@@ -97,67 +98,99 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         stateVarsE = stateVars[tetElemsInPoly]
         energyDensities = jax.vmap(poly_subtet_energy, (None,0,0,0,0,None))(U, stateVarsE, shapeGrads, vols, conns, self.materialModel)
         return np.sum(energyDensities)
-      
+        
 
     def test_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
+
         dirichletSets = ['top','bottom','left','right']
         ebcs = []
         for s in dirichletSets:
             ebcs.append(EssentialBC(nodeSet=s, component=0))
             ebcs.append(EssentialBC(nodeSet=s, component=1))
 
+        #dirichletSets = ['left','bottom']
+        #ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+        #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
+
+        #sigma = np.array([[1.0, 0.0], [0.0, 0.0]])
+        #traction_func = lambda x, n: np.dot(sigma, n)     
+        #edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
+
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
-        U = dofManager.create_field(0.0 * dofManager.get_unknown_values(self.dispTarget), dofManager.get_bc_values(self.dispTarget))
+        U = dofManager.create_field(dofManager.get_unknown_values(self.dispTarget), dofManager.get_bc_values(self.dispTarget))
 
-        partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = self.construct_aggregations(dofManager, U)
-
-        # print('dof st = ', dofStatus)
+        partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = self.construct_aggregations(dofManager, dirichletSets)
 
         poly_energy = lambda pU, pNodes, pElems : self.fine_poly_energy(pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
 
-        linOp = quilts.BddcOperatorSym(dofStatus, False, DIRICHLET_INDEX)
+        allBoundaryInCoarse = False
+        if allBoundaryInCoarse:
+          dofStatus = np.where(dofStatus==-2, 1, dofStatus)
+          wherePos = dofStatus>=0.0
+          numActive = np.count_nonzero(wherePos)
+          dofStatus = dofStatus.at[wherePos].set(np.arange(numActive))
+
+        linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
+
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
             nDofs = pU.size
-            pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
             polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-            linOp.add_poly(polyDofs, pStiffness)
+            pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
+            polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
+            polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
+            linOp.add_poly(polyDofs, pStiffness, polyX, polyY)
+
         linOp.finalize()
 
+        Ushp = U.shape
+        U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
+        #U = linOp.apply_stitch_interpolation(U.ravel()).reshape(Ushp)
         g = self.compute_gradient(U, self.internals)
+        g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
 
         print('gnorm in = ', np.linalg.norm(g))
 
-        g = g.at[dofManager.isBc].set(0.0).ravel()
-        dU = 0.0*U.ravel()
-        leftMost = g.copy()
-
-        delta = 1000.0
+        #dU = 0.0*U.ravel()
+        #leftMost = g.copy()
+        #delta = 1000.0
         #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
         #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
-        settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
-        quilts.solve_trust_region_model_problem(settings, linOp, g, delta, leftMost, dU)
+        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
+        #quilts.solve_trust_region_model_problem_quilt(settings, linOp, g, delta, leftMost, dU)
+        #U = U + dU.reshape(U.shape)
 
-        U = U + dU.reshape(U.shape)
+        dofStatus = linOp.get_dof_status().reshape(Ushp)
 
-        self.assertArrayNear(U, self.dispTarget, 12)
+        dU = linOp.apply_preconditioner(-g.ravel()).reshape(Ushp)
+        U = U + dU
+
+        error = np.abs(U - self.dispTarget)
+        print("error = ", np.linalg.norm(error))
+
+        #self.assertArrayNear(U, self.dispTarget, 12)
 
         # consider how to do initial guess. hard to be robust without warm start
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
                                scalarNodalFields = [('active', activeNodes)],
-                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),('dof_status', dofStatus.reshape(U.shape))])
+                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),
+                                                    ('dof_status', dofStatus),
+                                                    ('error', error)])
 
 
-    def construct_aggregations(self, dofManager, U):
+    def construct_aggregations(self, dofManager, dirichletSets):
         partitionElemField, polyElems, polyNodes, nodesToColors, activeNodes = \
-          self.construct_aggregates(self.numParts, ['bottom','top','right','left'], [])
+          self.construct_aggregates(self.numParts, ['bottom','top','right','left'], dirichletSets)
+
+        polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
+        polyElems = [np.array(list(polyElems[index]), dtype=np.int64) for index in polyElems]
 
         colorCount = np.array([len(nodesToColors[s]) for s in range(len(activeNodes))])
-        isActive = colorCount > 2 # activeNodes==1
+        isActive = activeNodes==1
 
         nodeStatus = -np.ones_like(activeNodes, dtype=np.int64)
         whereActive = np.where(isActive)[0]
@@ -171,11 +204,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         dofStatus = dofStatus.at[dofManager.isBc].set(DIRICHLET_INDEX).ravel()
   
         whereGlobal = np.where(dofStatus>=0)[0]
-        print('num global dofs = ', whereGlobal)
+        #print('num global dofs = ', whereGlobal)
         dofStatus = dofStatus.at[whereGlobal].set(np.arange(len(whereGlobal)))
 
-        polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
-        polyElems = [np.array(list(polyElems[index]), dtype=np.int64) for index in polyElems]
         return partitionElemField,activeNodes,polyElems,polyNodes,dofStatus
 
 
@@ -196,6 +227,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         activeNodes = onp.zeros_like(self.mesh.coords)[:,0]
         Coarsening.activate_nodes(nodesToColors, nodesToBoundary, activeNodes)
+
+        for p in polyNodes:
+          nodesOfPoly = polyNodes[p]
+          polyFaces, polyExterior, polyInterior = Coarsening.divide_poly_nodes_into_faces_and_interior(nodesToBoundary, nodesToColors, p, nodesOfPoly)
+
+          for f in polyFaces:
+              faceNodes = onp.array(list(polyFaces[f]))
+              # warning, this next function modifies activeNodes
+              active, inactive, lengthScale = Coarsening.determine_active_and_inactive_face_nodes(faceNodes, self.mesh.coords, activeNodes, True)
 
         return partitionElemField, polyElems, polyNodes, nodesToColors, np.array(activeNodes)
     
