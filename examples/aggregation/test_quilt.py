@@ -163,46 +163,58 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         print('as set dof status = ', dofStatus)
 
-        linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
+        Ushp = U.shape
+        g = self.load_function(U).ravel()
+
+        callLinop = False
+
+        if callLinop:
+
+          linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
+
+          for pNodes, pElems in zip(polyNodes, polyElems):
+              pU = U[pNodes]
+              nDofs = pU.size
+              polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
+              pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
+              polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
+              polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
+              linOp.add_poly(polyDofs, pStiffness, polyX, polyY)
+
+          linOp.finalize()
+
+          #U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
+          #g = self.compute_gradient(U, self.internals)
+          #U = linOp.apply_stitch_interpolation(U.ravel()).reshape(Ushp)
+          #g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
+          #print('gnorm in = ', np.linalg.norm(g))
+
+
+          #dU = 0.0*U.ravel()
+          #leftMost = g.copy()
+          #delta = 10000.0
+          #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
+          #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
+          #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
+          #quilts.solve_trust_region_model_problem_quilt(settings, linOp, g, delta, leftMost, dU)
+          #U = U + dU.reshape(U.shape)
+
+          dU = linOp.apply_preconditioner(-g.ravel()).reshape(Ushp)
+
+          error = np.abs(dU - self.dispTarget)
+          print("error quilt = ", error, np.linalg.norm(error))
+
+        nDofs = len(U.ravel())
+        # here do it directly
+        stiff = self.compute_stiffness(U, self.internals) #.reshape(nDofs,nDofs)
+        stiff = 0.0*stiff.reshape(nDofs, nDofs)
 
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
-            nDofs = pU.size
+            polyNdofs = pU.size
             polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-            pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
-            polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
-            polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
-            linOp.add_poly(polyDofs, pStiffness, polyX, polyY)
-
-        linOp.finalize()
-
-        Ushp = U.shape
-        #U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
-        #g = self.compute_gradient(U, self.internals)
-        #U = linOp.apply_stitch_interpolation(U.ravel()).reshape(Ushp)
-        #g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
-        #print('gnorm in = ', np.linalg.norm(g))
-
-        g = self.load_function(U).ravel()
-
-        #dU = 0.0*U.ravel()
-        #leftMost = g.copy()
-        #delta = 10000.0
-        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
-        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
-        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
-        #quilts.solve_trust_region_model_problem_quilt(settings, linOp, g, delta, leftMost, dU)
-        #U = U + dU.reshape(U.shape)
-
-        dU = linOp.apply_preconditioner(-g.ravel()).reshape(Ushp)
-
-        error = np.abs(dU - self.dispTarget)
-        print("error quilt = ", error, np.linalg.norm(error))
-
-        nDofs = len(dU.ravel())
-        # here do it directly
-        stiff = self.compute_stiffness(U, self.internals) #.reshape(nDofs,nDofs)
-        stiff = stiff.reshape(nDofs, nDofs)
+            pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(polyNdofs,polyNdofs)
+            stiff = stiff.at[np.ix_(polyDofs, polyDofs)].add(pStiffness)
 
         whereDirichlet = dofStatus.ravel()==DIRICHLET_INDEX
         for id, isDir in enumerate(whereDirichlet):
@@ -212,8 +224,35 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                 stiff = stiff.at[id,id].set(1.0)
                 g = g.at[id].set(0.0)
 
-        #dU = np.linalg.solve(stiff,-g)
-              
+        inject, interp = self.create_interpolation(nDofs)
+
+        stiff_c = interp.T @ stiff @ interp
+        g_c = interp.T @ g
+
+        coarseIds = np.arange(nDofs-2)[~whereDirichlet[inject]]
+
+        print('K_c = ', stiff_c[coarseIds,coarseIds[0]]) #np.ix_(coarseIds,coarseIds)])
+
+        dU_c = np.linalg.solve(stiff_c, -g_c)
+        dU = interp @ dU_c
+
+        U = U + dU.reshape(Ushp)
+        error = np.abs(U - self.dispTarget)
+        print("error = ", error, np.linalg.norm(error))
+
+        #self.assertArrayNear(U, self.dispTarget, 12)
+
+        # consider how to do initial guess. hard to be robust without warm start
+        if callLinop: dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
+        else: dofStatus = dofStatus.reshape(Ushp)
+        output_mesh_and_fields('patch', self.mesh, 
+                               scalarElemFields = [('partition', partitionElemField)],
+                               scalarNodalFields = [('active', activeNodes)],
+                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),
+                                                    ('dof_status', dofStatus),
+                                                    ('error', error)])
+
+    def create_interpolation(self, nDofs):
         inject = np.hstack((np.arange(12),np.arange(14,nDofs)))
 
         # removing 2 dofs 
@@ -223,35 +262,11 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         interp = interp.at[12,2].set(1.0)
         interp = interp.at[12,10].set(-1.0)
         interp = interp.at[12,18].set(1.0)
-        #interp = interp.at[13,3].set(1.0)
         interp = interp.at[13,11].set(-1.0)
         interp = interp.at[13,19].set(1.0)
         for i in range(14,nDofs):
             interp = interp.at[i,i-2].set(1.0)
-
-        stiff_c = interp.T @ stiff @ interp
-        g_c = interp.T @ g
-
-        print('gc = ', -g_c[~whereDirichlet[inject]])
-
-        dU_c = np.linalg.solve(stiff_c,-g_c)
-        dU = interp @ dU_c
-
-        U = U + dU.reshape(Ushp)
-
-        error = np.abs(U - self.dispTarget)
-        print("error = ", error, np.linalg.norm(error))
-
-        #self.assertArrayNear(U, self.dispTarget, 12)
-
-        # consider how to do initial guess. hard to be robust without warm start
-        dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
-        output_mesh_and_fields('patch', self.mesh, 
-                               scalarElemFields = [('partition', partitionElemField)],
-                               scalarNodalFields = [('active', activeNodes)],
-                               vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),
-                                                    ('dof_status', dofStatus),
-                                                    ('error', error)])
+        return inject,interp
 
 
     def construct_aggregations(self, dofManager, dirichletSets):
