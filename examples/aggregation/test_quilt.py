@@ -154,7 +154,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           numActive = np.count_nonzero(wherePos)
           dofStatus = dofStatus.at[wherePos].set(np.arange(numActive))
 
-        noInterior = True
+        noInterior = False
         if noInterior:
           dofStatus = np.where(dofStatus==-1, 1, dofStatus)
           wherePos = dofStatus>=0.0
@@ -166,8 +166,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Ushp = U.shape
         g = self.load_function(U).ravel()
 
-        callLinop = False
-
+        callLinop = True
         if callLinop:
 
           linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
@@ -176,10 +175,10 @@ class PolyPatchTest(MeshFixture.MeshFixture):
               pU = U[pNodes]
               nDofs = pU.size
               polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-              pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
+              stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
               polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
               polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
-              linOp.add_poly(polyDofs, pStiffness, polyX, polyY)
+              linOp.add_poly(polyDofs, stiff_pp, polyX, polyY)
 
           linOp.finalize()
 
@@ -188,7 +187,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           #U = linOp.apply_stitch_interpolation(U.ravel()).reshape(Ushp)
           #g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
           #print('gnorm in = ', np.linalg.norm(g))
-
 
           #dU = 0.0*U.ravel()
           #leftMost = g.copy()
@@ -204,9 +202,13 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           error = np.abs(dU - self.dispTarget)
           print("error quilt = ", error, np.linalg.norm(error))
 
+
         nDofs = len(U.ravel())
         whereDirichlet = dofStatus.ravel()==DIRICHLET_INDEX
-        inject, interp = self.create_interpolation(nDofs)
+        dofs_c,dofs_f,interp = self.create_interpolation(nDofs)
+
+        dofToCoarseDof = -np.ones(nDofs, dtype=int)
+        dofToCoarseDof = dofToCoarseDof.at[dofs_c].set(np.arange(len(dofs_c), dtype=int))
 
         stiff_c = np.zeros((nDofs-2,nDofs-2))
 
@@ -214,30 +216,43 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             pU = U[pNodes]
             polyNdofs = pU.size
             polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-            pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(polyNdofs,polyNdofs)
+            stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(polyNdofs,polyNdofs)
 
-            polyStiff = np.zeros((nDofs,nDofs))
-            polyStiff = polyStiff.at[np.ix_(polyDofs, polyDofs)].set(pStiffness)
-            polyStiff = self.set_dirichlet(polyStiff, whereDirichlet)
-            polyStiff_c = interp.T @ polyStiff @ interp
-            stiff_c = stiff_c + polyStiff_c
+            gstiff_pp = np.zeros((nDofs,nDofs))
+            gstiff_pp = gstiff_pp.at[np.ix_(polyDofs, polyDofs)].set(stiff_pp)
 
-        g = self.set_residual_dirichlet(g, whereDirichlet)
+            term1 = self.set_dirichlet(gstiff_pp[np.ix_(dofs_c,dofs_c)], whereDirichlet[dofs_c])
+            term2 = self.set_dirichlet(interp[dofs_f].T @ gstiff_pp[np.ix_(dofs_f,dofs_c)], whereDirichlet[dofs_c])
+            term3 = gstiff_pp[np.ix_(dofs_c, dofs_f)] @ interp[dofs_f]
+            term4 = interp[dofs_f].T @ gstiff_pp[np.ix_(dofs_f,dofs_f)] @ interp[dofs_f]
+
+
+            coarseStiff_p = term1+term2+term3+term4
+
+            freePolyNodes = polyDofs[np.where( ~whereDirichlet[polyDofs] )]
+            coarseFreePolyNodes = dofToCoarseDof[freePolyNodes]
+            coarseFreePolyNodes = coarseFreePolyNodes[np.where(coarseFreePolyNodes!=-1)]
+
+            #print('term2 = ', term2[np.ix_(coarseFreePolyNodes,coarseFreePolyNodes)])
+            #print('term3 = ', term3[np.ix_(coarseFreePolyNodes,coarseFreePolyNodes)])
+            #print('term4 = ', term4[np.ix_(coarseFreePolyNodes,coarseFreePolyNodes)])
+
+            stiff_c = stiff_c + coarseStiff_p
 
         g_c = interp.T @ g
 
-        coarseIds = np.arange(nDofs-2)[~whereDirichlet[inject]]
+        # apply BCs
+        stiff_c = self.set_dirichlet(stiff_c, whereDirichlet[dofs_c])
+        g_c = self.set_residual_dirichlet(g_c, whereDirichlet[dofs_c])
 
-        print('K_c = ', stiff_c[coarseIds,coarseIds[0]]) #np.ix_(coarseIds,coarseIds)])
+        #print('K_c = ', stiff_c[coarseIds,coarseIds[0]]) #np.ix_(coarseIds,coarseIds)])
 
         dU_c = np.linalg.solve(stiff_c, -g_c)
         dU = interp @ dU_c
 
         U = U + dU.reshape(Ushp)
         error = np.abs(U - self.dispTarget)
-        print("error = ", error, np.linalg.norm(error))
-
-        #self.assertArrayNear(U, self.dispTarget, 12)
+        print("error = ", np.linalg.norm(error))
 
         # consider how to do initial guess. hard to be robust without warm start
         if callLinop: dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
@@ -264,7 +279,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         return r
 
     def create_interpolation(self, nDofs):
-        inject = np.hstack((np.arange(12),np.arange(14,nDofs)))
+        dofs_c = np.hstack((np.arange(12),np.arange(14,nDofs)))
+        dofs_f = np.array([12,13])
 
         # removing 2 dofs 
         interp = np.zeros((nDofs,nDofs-2))
@@ -277,7 +293,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         interp = interp.at[13,19].set(1.0)
         for i in range(14,nDofs):
             interp = interp.at[i,i-2].set(1.0)
-        return inject,interp
+        return dofs_c,dofs_f,interp
 
 
     def construct_aggregations(self, dofManager, dirichletSets):
