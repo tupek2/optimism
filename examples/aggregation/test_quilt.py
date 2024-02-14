@@ -205,28 +205,25 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           print("error quilt = ", error, np.linalg.norm(error))
 
         nDofs = len(U.ravel())
-        # here do it directly
-        stiff = self.compute_stiffness(U, self.internals) #.reshape(nDofs,nDofs)
-        stiff = 0.0*stiff.reshape(nDofs, nDofs)
+        whereDirichlet = dofStatus.ravel()==DIRICHLET_INDEX
+        inject, interp = self.create_interpolation(nDofs)
+
+        stiff_c = np.zeros((nDofs-2,nDofs-2))
 
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
             polyNdofs = pU.size
             polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
             pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(polyNdofs,polyNdofs)
-            stiff = stiff.at[np.ix_(polyDofs, polyDofs)].add(pStiffness)
 
-        whereDirichlet = dofStatus.ravel()==DIRICHLET_INDEX
-        for id, isDir in enumerate(whereDirichlet):
-            if isDir:
-                stiff = stiff.at[:,id].set(0.0)
-                stiff = stiff.at[id,:].set(0.0)
-                stiff = stiff.at[id,id].set(1.0)
-                g = g.at[id].set(0.0)
+            polyStiff = np.zeros((nDofs,nDofs))
+            polyStiff = polyStiff.at[np.ix_(polyDofs, polyDofs)].set(pStiffness)
+            polyStiff = self.set_dirichlet(polyStiff, whereDirichlet)
+            polyStiff_c = interp.T @ polyStiff @ interp
+            stiff_c = stiff_c + polyStiff_c
 
-        inject, interp = self.create_interpolation(nDofs)
+        g = self.set_residual_dirichlet(g, whereDirichlet)
 
-        stiff_c = interp.T @ stiff @ interp
         g_c = interp.T @ g
 
         coarseIds = np.arange(nDofs-2)[~whereDirichlet[inject]]
@@ -251,6 +248,20 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                                vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),
                                                     ('dof_status', dofStatus),
                                                     ('error', error)])
+
+    def set_dirichlet(self, stiff, whereDirichlet):
+        for id, isDir in enumerate(whereDirichlet):
+            if isDir:
+                stiff = stiff.at[:,id].set(0.0)
+                stiff = stiff.at[id,:].set(0.0)
+                stiff = stiff.at[id,id].set(1.0)
+        return stiff
+
+    def set_residual_dirichlet(self, r, whereDirichlet):
+        for id, isDir in enumerate(whereDirichlet):
+            if isDir:
+                r = r.at[id].set(0.0)
+        return r
 
     def create_interpolation(self, nDofs):
         inject = np.hstack((np.arange(12),np.arange(14,nDofs)))
