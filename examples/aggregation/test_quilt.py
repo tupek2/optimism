@@ -54,13 +54,13 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        self.Nx = 4
-        self.Ny = 3
-        self.numParts = 2
+        #self.Nx = 4
+        #self.Ny = 3
+        #self.numParts = 2
 
-        #self.Nx = 6
-        #self.Ny = 5
-        #self.numParts = 4
+        self.Nx = 6
+        self.Ny = 5
+        self.numParts = 4
 
         #self.Nx = 18
         #self.Ny = 10
@@ -108,9 +108,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.compute_gradient = jax.grad(self.compute_energy, 0)
 
         self.compute_stiffness = jax.hessian(self.compute_energy, 0)
-
-        #self.compute_hessvec = jax.jit(lambda x, p, vx:
-        #                       jax.jvp(lambda z: self.compute_gradient(z,p), (x,), (vx,))[1])
         self.compute_hessvec = lambda x, p, vx: jax.jvp(lambda z: self.compute_gradient(z,p), (x,), (vx,))[1]
         self.internals = mcxFuncs.compute_initial_state()
 
@@ -128,15 +125,15 @@ class PolyPatchTest(MeshFixture.MeshFixture):
     def test_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
 
-        #dirichletSets = ['top','bottom','left','right']
-        #ebcs = []
-        #for s in dirichletSets:
-        #    ebcs.append(EssentialBC(nodeSet=s, component=0))
-        #    ebcs.append(EssentialBC(nodeSet=s, component=1))
+        dirichletSets = ['top','bottom','left','right']
+        ebcs = []
+        for s in dirichletSets:
+            ebcs.append(EssentialBC(nodeSet=s, component=0))
+            ebcs.append(EssentialBC(nodeSet=s, component=1))
 
-        dirichletSets = ['left','bottom']
-        ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
-                FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
+        #dirichletSets = ['left','bottom']
+        #ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+        #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
@@ -161,102 +158,44 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           numActive = np.count_nonzero(wherePos)
           dofStatus = dofStatus.at[wherePos].set(np.arange(numActive))
 
-        print('as set dof status = ', dofStatus)
+        #print('as set dof status = ', dofStatus)
 
         Ushp = U.shape
         g = self.load_function(U).ravel()
 
-        callLinop = True
-        if callLinop:
-
-          linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
-
-          for pNodes, pElems in zip(polyNodes, polyElems):
-              pU = U[pNodes]
-              nDofs = pU.size
-              polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-              stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
-              polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
-              polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
-              linOp.add_poly(polyDofs, stiff_pp, polyX, polyY)
-
-          linOp.finalize()
-
-          #U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
-          #g = self.compute_gradient(U, self.internals)
-          #U = linOp.apply_stitch_interpolation(U.ravel()).reshape(Ushp)
-          #g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
-          #print('gnorm in = ', np.linalg.norm(g))
-
-          #dU = 0.0*U.ravel()
-          #leftMost = g.copy()
-          #delta = 10000.0
-          #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
-          #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
-          #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
-          #quilts.solve_trust_region_model_problem_quilt(settings, linOp, g, delta, leftMost, dU)
-          #U = U + dU.reshape(U.shape)
-
-          dU = linOp.apply_preconditioner(-g.ravel()).reshape(Ushp)
-
-          error = np.abs(dU - self.dispTarget)
-          print("error quilt = ", error, np.linalg.norm(error))
-
-
-        nDofs = len(U.ravel())
-        whereDirichlet = dofStatus.ravel()==DIRICHLET_INDEX
-        dofs_c,dofs_f,interp = self.create_interpolation(nDofs)
-
-        dofToCoarseDof = -np.ones(nDofs, dtype=int)
-        dofToCoarseDof = dofToCoarseDof.at[dofs_c].set(np.arange(len(dofs_c), dtype=int))
-
-        stiff_c = np.zeros((nDofs-2,nDofs-2))
+        linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
 
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
-            polyNdofs = pU.size
+            nDofs = pU.size
             polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-            stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(polyNdofs,polyNdofs)
+            stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
+            polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
+            polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
+            linOp.add_poly(polyDofs, stiff_pp, polyX, polyY)
 
-            gstiff_pp = np.zeros((nDofs,nDofs))
-            gstiff_pp = gstiff_pp.at[np.ix_(polyDofs, polyDofs)].set(stiff_pp)
+        linOp.finalize()
 
-            term1 = self.set_dirichlet(gstiff_pp[np.ix_(dofs_c,dofs_c)], whereDirichlet[dofs_c])
-            term2 = self.set_dirichlet(interp[dofs_f].T @ gstiff_pp[np.ix_(dofs_f,dofs_c)], whereDirichlet[dofs_c])
-            term3 = gstiff_pp[np.ix_(dofs_c, dofs_f)] @ interp[dofs_f]
-            term4 = interp[dofs_f].T @ gstiff_pp[np.ix_(dofs_f,dofs_f)] @ interp[dofs_f]
+        U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
+        g = self.compute_gradient(U, self.internals).ravel()
+        g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
 
+        dU = 0.0*U.ravel()
+        leftMost = g.copy()
+        delta = 10000.0
+        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
+        settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
+        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
+        quilts.solve_trust_region_model_problem_quilt(settings, linOp, g, delta, leftMost, dU)
 
-            coarseStiff_p = term1+term2+term3+term4
+        #dU = linOp.apply_preconditioner(-g.ravel()).reshape(Ushp)
+        U = U + dU.reshape(U.shape)
 
-            freePolyNodes = polyDofs[np.where( ~whereDirichlet[polyDofs] )]
-            coarseFreePolyNodes = dofToCoarseDof[freePolyNodes]
-            coarseFreePolyNodes = coarseFreePolyNodes[np.where(coarseFreePolyNodes!=-1)]
-
-            #print('term2 = ', term2[np.ix_(coarseFreePolyNodes,coarseFreePolyNodes)])
-            #print('term3 = ', term3[np.ix_(coarseFreePolyNodes,coarseFreePolyNodes)])
-            #print('term4 = ', term4[np.ix_(coarseFreePolyNodes,coarseFreePolyNodes)])
-
-            stiff_c = stiff_c + coarseStiff_p
-
-        g_c = interp.T @ g
-
-        # apply BCs
-        stiff_c = self.set_dirichlet(stiff_c, whereDirichlet[dofs_c])
-        g_c = self.set_residual_dirichlet(g_c, whereDirichlet[dofs_c])
-
-        #print('K_c = ', stiff_c[coarseIds,coarseIds[0]]) #np.ix_(coarseIds,coarseIds)])
-
-        dU_c = np.linalg.solve(stiff_c, -g_c)
-        dU = interp @ dU_c
-
-        U = U + dU.reshape(Ushp)
         error = np.abs(U - self.dispTarget)
-        print("error = ", np.linalg.norm(error))
+        print("error quilt = ", error, np.linalg.norm(error))
 
         # consider how to do initial guess. hard to be robust without warm start
-        if callLinop: dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
-        else: dofStatus = dofStatus.reshape(Ushp)
+        dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
                                scalarNodalFields = [('active', activeNodes)],
