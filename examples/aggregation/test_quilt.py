@@ -23,10 +23,10 @@ from optimism.FunctionSpace import DofManager
 import optimism.TensorMath as TensorMath
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
-#from optimism.material import Neohookean as MatModel
-from optimism.material import LinearElastic as MatModel
+from optimism.material import Neohookean as MatModel
+#from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
-import operator as op
+from optimism import EquationSolver
 
 import os
 import sys
@@ -51,6 +51,9 @@ def poly_subtet_energy(field, stateVars, B, vols, conns, material):
     return vols @ jax.vmap(tet_quadrature_energy, (None,0,0,None,None))(field, stateVars, B, conns, material)
 
 
+trSettings = EquationSolver.get_settings(max_trust_iters=400, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8)
+
+
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
@@ -58,15 +61,19 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         #self.Ny = 3
         #self.numParts = 2
 
-        self.Nx = 6
-        self.Ny = 5
+        self.Nx = 7
+        self.Ny = 6
         self.numParts = 4
 
-        #self.Nx = 18
-        #self.Ny = 10
-        #self.numParts = 10 #12 # self.numParts = 12 breaks with 12, probably local matrix inversion issue?
+        #self.Nx = 21
+        #self.Ny = 8
+        #self.numParts = 12  #12 # self.numParts = 12 breaks with 12, probably local matrix inversion issue?
 
-        xRange = [0.,6.]
+        #self.Nx = 44
+        #self.Ny = 17
+        #self.numParts = 40  #12 # self.numParts = 12 breaks with 12, probably local matrix inversion issue?
+
+        xRange = [0.,5.0]
         yRange = [0.,1.0]
         self.targetDispGrad = np.array([[0.1, -0.2],[-0.3, 0.15]])
         self.expectedVolume = (xRange[1]-xRange[0]) * (yRange[1]-yRange[0])
@@ -84,20 +91,32 @@ class PolyPatchTest(MeshFixture.MeshFixture):
                  'poisson ratio': nu,
                  'version': 'coupled'}
 
-        sigma = np.array([[1.0, 0.0], [0.0, 0.5]])
-        traction_func = lambda x, n: np.dot(sigma, n)     
+        self.setup='bending' # dirichlet_patch, neumann_patch
+        #self.setup='neumann_patch' # dirichlet_patch, neumann_patch
+
+        if self.setup=='bending':
+          #traction_func = lambda x, n: np.array([0.0, 0.01])
+          traction_func = lambda x, n: np.array([0.5, 0.0])
+          self.dispTarget = 0.0*self.dispTarget
+        elif self.setup=='neumann_patch':
+          sigma = np.array([[1.0, 0.0], [0.0, 0.5]])
+          traction_func = lambda x, n: np.dot(sigma, n)
+          modulus1 = (1.0 - self.nu**2)/self.E
+          modulus2 = -self.nu*(1.0+self.nu)/self.E
+          dispGxx = (modulus1*sigma[0, 0] + modulus2*sigma[1, 1])
+          dispGyy = (modulus2*sigma[0, 0] + modulus1*sigma[1, 1])
+          self.dispTarget = np.column_stack( (dispGxx*self.mesh.coords[:,0],
+                                              dispGyy*self.mesh.coords[:,1]) )
+        else:
+          sigma = np.array([[0.0, 0.0], [0.0, 0.0]])
+          traction_func = lambda x, n: np.dot(sigma, n)
+
         edgeQuadRule = QuadratureRule.create_quadrature_rule_1D(degree=2)
-        
-        modulus1 = (1.0 - self.nu**2)/self.E
-        modulus2 = -self.nu*(1.0+self.nu)/self.E
-        dispGxx = (modulus1*sigma[0, 0] + modulus2*sigma[1, 1])
-        dispGyy = (modulus2*sigma[0, 0] + modulus1*sigma[1, 1])
-        self.dispTarget = np.column_stack( (dispGxx*self.mesh.coords[:,0],
-                                            dispGyy*self.mesh.coords[:,1]) )
 
         def objective(U):
             loadPotential = Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['right'], traction_func)
-            loadPotential += Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['top'], traction_func)
+            if self.setup=='neumann_patch':
+              loadPotential += Mechanics.compute_traction_potential_energy(self.fs, U, edgeQuadRule, self.mesh.sideSets['top'], traction_func)
             return loadPotential
 
         self.load_function = jax.grad(objective)
@@ -125,15 +144,21 @@ class PolyPatchTest(MeshFixture.MeshFixture):
     def test_poly_patch_test_all_dirichlet(self):
         # MRT eventually use the dirichlet ones to precompute some initial strain offsets/biases
 
-        dirichletSets = ['top','bottom','left','right']
-        ebcs = []
-        for s in dirichletSets:
-            ebcs.append(EssentialBC(nodeSet=s, component=0))
-            ebcs.append(EssentialBC(nodeSet=s, component=1))
+        if self.setup=="bending":
+          dirichletSets = ['left']
+          ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+                  FunctionSpace.EssentialBC(nodeSet='left', component=1)]
+        elif self.setup=='neumann_patch':
+          dirichletSets = ['left','bottom']
+          ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
+                  FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
+        else :
+          dirichletSets = ['top','bottom','left','right']
+          ebcs = []
+          for s in dirichletSets:
+              ebcs.append(EssentialBC(nodeSet=s, component=0))
+              ebcs.append(EssentialBC(nodeSet=s, component=1))
 
-        #dirichletSets = ['left','bottom']
-        #ebcs = [FunctionSpace.EssentialBC(nodeSet='left', component=0),
-        #        FunctionSpace.EssentialBC(nodeSet='bottom', component=1)]
 
         dofManager = DofManager(self.fs, dim=self.mesh.coords.shape[1], EssentialBCs=ebcs)
 
@@ -158,44 +183,97 @@ class PolyPatchTest(MeshFixture.MeshFixture):
           numActive = np.count_nonzero(wherePos)
           dofStatus = dofStatus.at[wherePos].set(np.arange(numActive))
 
-        #print('as set dof status = ', dofStatus)
+
+        useQuilt = True
+
+        if useQuilt:
+          linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
+          for pNodes, pElems in zip(polyNodes, polyElems):
+              pU = U[pNodes]
+              nDofs = pU.size
+              polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
+              stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
+              polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
+              polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
+              linOp.add_poly(polyDofs, stiff_pp, polyX, polyY)
+          linOp.finalize()
+
+        else:
+          linOp = quilts.BddcOperatorSym(dofStatus, True, DIRICHLET_INDEX)
+          for pNodes, pElems in zip(polyNodes, polyElems):
+              pU = U[pNodes]
+              nDofs = pU.size
+              pStiffness = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
+              polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
+              linOp.add_poly(polyDofs, pStiffness)
+          linOp.finalize()
 
         Ushp = U.shape
-        g = self.load_function(U).ravel()
-
-        linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
-
-        for pNodes, pElems in zip(polyNodes, polyElems):
-            pU = U[pNodes]
-            nDofs = pU.size
-            polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-            stiff_pp = poly_stiffness(pU, pNodes, pElems).reshape(nDofs,nDofs)
-            polyX = self.mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
-            polyY = self.mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
-            linOp.add_poly(polyDofs, stiff_pp, polyX, polyY)
-
-        linOp.finalize()
-
         U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
-        g = self.compute_gradient(U, self.internals).ravel()
-        g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
+
+        def residual(Ut):
+          g = self.compute_gradient(Ut, self.internals).ravel() + self.load_function(Ut).ravel()
+          g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
+          return g
+        
+        g = residual(U)
 
         dU = 0.0*U.ravel()
         leftMost = g.copy()
-        delta = 10000.0
-        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.DIAGONAL)
-        settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC)
-        #settings = quilts.TrustRegionSettings(1e-11, 200, quilts.TrustRegionSettings.BDDC_AND_DIAGONAL)
-        quilts.solve_trust_region_model_problem_quilt(settings, linOp, g, delta, leftMost, dU)
 
-        #dU = linOp.apply_preconditioner(-g.ravel()).reshape(Ushp)
-        U = U + dU.reshape(U.shape)
+        precondMethod = quilts.TrustRegionSettings.BDDC_AND_DIAGONAL
+        #precondMethod = quilts.TrustRegionSettings.BDDC
+        #precondMethod = quilts.TrustRegionSettings.DIAGONAL
+        cgTolerance = 1e-10
+        trTolerance = 2.5 * cgTolerance
+        maxCgIters = 50
+        boundaryTolerance = 0.9
+
+        gNorm = np.linalg.norm(g)
+        delta = 100
+
+        for trustIter in range(trSettings.max_trust_iters):
+          print('delta =', delta, 'at iter', trustIter)
+          cgSettings = quilts.TrustRegionSettings(cgTolerance, maxCgIters, precondMethod)
+          modelEnergyChange = quilts.solve_trust_region_model_problem(cgSettings, linOp, g, delta, leftMost, dU)
+
+          UTrial = U + dU.reshape(U.shape)
+          gTrial = residual(UTrial)
+
+          #if settings.use_incremental_objective:
+          incrementalEnergyChange = 0.5 * (dU @ (g+gTrial))
+
+          rho = incrementalEnergyChange / modelEnergyChange
+
+          if modelEnergyChange > 0:
+            print('Found a positive model objective increase.  Debug if you see this.')
+            rho = -rho
+            
+          if not rho >= trSettings.eta2:  # write it this way to handle NaNs
+              delta *= trSettings.t1
+          elif rho > trSettings.eta3 and np.linalg.norm(dU) > boundaryTolerance * delta:
+              delta *= trSettings.t2
+
+          gTrialNorm = np.linalg.norm(gTrial)
+
+          print('g norm trial = ', gTrialNorm)
+
+          willAccept = rho >= trSettings.eta1 or (rho >= -0 and gTrialNorm <= gNorm)
+          if willAccept:
+             g = gTrial
+             gNorm = gTrialNorm
+             U = UTrial
+
+             if gNorm <= trTolerance:
+                break
+
 
         error = np.abs(U - self.dispTarget)
-        print("error quilt = ", error, np.linalg.norm(error))
+        #print("error quilt = ", error, np.linalg.norm(error))
 
         # consider how to do initial guess. hard to be robust without warm start
-        dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
+        #dofStatus = linOp.get_dof_status().reshape(Ushp) # readable dofstatus
+        dofStatus = dofStatus.reshape(Ushp) # readable dofstatus
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
                                scalarNodalFields = [('active', activeNodes)],
