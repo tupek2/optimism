@@ -14,7 +14,9 @@ def set_value_insert(themap, key, value):
         themap[key] = set([value])
 
 
-def create_graph(conns):
+def create_graph(mesh):
+    conns = onp.array([c[mesh.parentElement.vertexNodes] for c in mesh.conns])
+
     elemToElem = [ [] for _ in range(len(conns)) ]
     _, edges = Mesh.create_edges(conns)
     for edge in edges:
@@ -53,8 +55,8 @@ def create_nodes_to_boundaries_if_active(mesh, boundaryNames, activeNodalField):
     return nodesToBoundary
 
 @timeme
-def create_partitions(conns, numParts):
-    graph = create_graph(conns)
+def create_partitions(mesh, numParts):
+    graph = create_graph(mesh)
     (edgecuts, parts) = metis.part_graph(graph, numParts, iptype='edge', rtype='greedy', contig=True, ncuts=1)
     return onp.array(parts, dtype=int)
 

@@ -1,10 +1,6 @@
 # jaxy stuff
-from collections import namedtuple
 import jax
 import jax.numpy as np
-# data class
-from chex._src.dataclass import dataclass
-from chex._src import pytypes
 
 # testing stuff
 from optimism.test import MeshFixture
@@ -12,7 +8,6 @@ from optimism.Timer import timeme
 from Plotting import output_mesh_and_fields
 
 # poly stuff
-
 from optimism.aggregation import DomainDecomp
 
 # mesh stuff
@@ -28,18 +23,6 @@ import optimism.FunctionSpace as FunctionSpace
 from optimism.material import Neohookean as MatModel
 #from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
-from optimism import EquationSolver
-
-import os
-import sys
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '/Users/tupek2/dev/agglomerationpreconditioner/python'))
-import quilts
-
-DIRICHLET_INDEX = np.iinfo(np.int32).min
-
-
-trSettings = EquationSolver.get_settings(max_trust_iters=400, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8)
 
 
 class PolyPatchTest(MeshFixture.MeshFixture):
@@ -144,7 +127,8 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         U = dofManager.create_field(0.0 * dofManager.get_unknown_values(self.dispTarget), dofManager.get_bc_values(self.dispTarget))
 
-        partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = DomainDecomp.construct_aggregations(self.mesh, self.numParts, dofManager, dirichletSets)
+        allsidesets = ['all_boundary']
+        partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = DomainDecomp.construct_aggregations(self.mesh, self.numParts, dofManager, allsidesets, dirichletSets)
 
         poly_energy = lambda pU, pNodes, pElems : DomainDecomp.fine_poly_energy(self.mesh, self.fs, self.materialModel, pU, U, self.internals, pElems, pNodes)
         poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
@@ -152,7 +136,6 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         allBoundaryInCoarse = False
         noInteriorDofs = False
         useQuilt = True
-
         linOp = DomainDecomp.create_linear_operator(self.mesh, U, polyElems, polyNodes, poly_stiffness, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt)
 
         def energy(Ut):
@@ -163,20 +146,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
             return g
         
-        precondMethod = quilts.TrustRegionSettings.COARSE_JACOBI_COARSE
-        #precondMethod = quilts.TrustRegionSettings.JACOBI_COARSE_JACOBI
-        #precondMethod = quilts.TrustRegionSettings.JACOBI
+        trSettings = DomainDecomp.TrustRegionSettings
 
-        cgTolerance = 1e-10
-        trTolerance = 2.5 * cgTolerance
-        maxCgIters = 50
-        cgSettings = quilts.TrustRegionSettings(cgTolerance, maxCgIters, precondMethod)
-        
-        boundaryTolerance = 0.9
-
-        delta = 1.0 #1e-4 # 100
-
-        U = DomainDecomp.solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness, linOp, energy, residual, trSettings, trTolerance, cgSettings, boundaryTolerance, delta)
+        U = DomainDecomp.solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness, linOp, energy, residual, trSettings)
              
         dofStatus = dofStatus.reshape(U.shape) # readable dofstatus
         output_mesh_and_fields('patch', self.mesh, 

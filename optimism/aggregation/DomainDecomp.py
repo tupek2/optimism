@@ -4,6 +4,11 @@ import numpy as onp
 import optimism.TensorMath as TensorMath
 from optimism.aggregation import Coarsening
 
+# data class
+from chex._src.dataclass import dataclass
+from chex._src import pytypes
+from enum import Enum
+
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '/Users/tupek2/dev/agglomerationpreconditioner/python'))
@@ -36,7 +41,7 @@ def fine_poly_energy(mesh, fs, materialModel, polyDisp, U, stateVars, tetElemsIn
 # geometric boundaries must cover the entire boundary.
 # coarse nodes are maintained wherever the node is involved in 2 boundaries
 def construct_aggregates(mesh, numParts, geometricBoundaries, dirichletBoundaries):
-    partitionElemField = Coarsening.create_partitions(mesh.conns, numParts)
+    partitionElemField = Coarsening.create_partitions(mesh, numParts)
     polyElems = Coarsening.create_poly_elems(partitionElemField) # dict from poly number to elem numbers
     polyNodes = Coarsening.extract_poly_nodes(mesh.conns, polyElems) # dict from poly number to global node numbers
 
@@ -62,9 +67,9 @@ def construct_aggregates(mesh, numParts, geometricBoundaries, dirichletBoundarie
     return partitionElemField, polyElems, polyNodes, nodesToColors, np.array(activeNodes)
 
 
-def construct_aggregations(mesh, numParts, dofManager, dirichletSets):
+def construct_aggregations(mesh, numParts, dofManager, allsidesets, dirichletSets):
     partitionElemField, polyElems, polyNodes, nodesToColors, activeNodes = \
-        construct_aggregates(mesh, numParts, ['bottom','top','right','left'], dirichletSets)
+        construct_aggregates(mesh, numParts, allsidesets, dirichletSets)
 
     polyNodes = [np.array(list(polyNodes[index]), dtype=np.int64) for index in polyNodes]
     polyElems = [np.array(list(polyElems[index]), dtype=np.int64) for index in polyElems]
@@ -88,6 +93,7 @@ def construct_aggregations(mesh, numParts, dofManager, dirichletSets):
     dofStatus = dofStatus.at[whereGlobal].set(np.arange(len(whereGlobal)))
 
     return partitionElemField,activeNodes,polyElems,polyNodes,dofStatus
+
 
 def create_linear_operator(mesh, U, polyElems, polyNodes, poly_stiffness_func, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt):
     if allBoundaryInCoarse:
@@ -126,11 +132,55 @@ def create_linear_operator(mesh, U, polyElems, polyNodes, poly_stiffness_func, d
     return linOp
 
 
-def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp, energy_func, residual_func, trSettings, trTolerance, cgSettings, boundaryTolerance, delta):
+class PreconditionerMethod(Enum):
+    JACOBI = 0
+    JACOBI_COARSE_JACOBI = 1
+    COARSE_JACOBI_COARSE = 2
+
+
+def convert_to_quilt_precond(precondMethod : PreconditionerMethod):
+    if precondMethod==PreconditionerMethod.JACOBI:
+        return quilts.TrustRegionSettings.JACOBI
+    elif precondMethod==PreconditionerMethod.JACOBI_COARSE_JACOBI:
+        return quilts.TrustRegionSettings.JACOBI_COARSE_JACOBI
+    elif precondMethod==PreconditionerMethod.COARSE_JACOBI_COARSE:
+        return quilts.TrustRegionSettings.COARSE_JACOBI_COARSE
+    else:
+        print('invalid preconditioner method requested')
+        return quilts.TrustRegionSettings.JACOBI
+
+
+@dataclass(frozen=True, mappable_dataclass=True)
+class TrustRegionCgSettings:
+    cgTolerance = 1e-10
+    trTolerance = 2.5 * cgTolerance
+    maxCgIters = 60
+    maxCgItersToResetPrecond = 40
+    preconditionerMethod : PreconditionerMethod = PreconditionerMethod.JACOBI_COARSE_JACOBI
+
+
+@dataclass(frozen=True, mappable_dataclass=True)
+class TrustRegionSettings:
+    max_trust_iters=400
+    t1             = 0.4
+    t2             = 1.5
+    eta1           = 1e-6
+    eta2           = 0.2
+    eta3           = 0.8
+    boundaryTolerance = 0.9
+    delta0         = 1.0
+    trustRegionCgSettings : TrustRegionCgSettings = TrustRegionCgSettings()
+
+
+def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp, energy_func, residual_func, trSettings : TrustRegionSettings):
     logfile = 'log.txt'
     f = open(logfile, "w")
 
-    maxCgItersToResetPrecond = 35
+    trustRegionCgSettings = trSettings.trustRegionCgSettings
+    quiltCgSettings = quilts.TrustRegionSettings(trustRegionCgSettings.cgTolerance, trustRegionCgSettings.maxCgIters,
+                                                 convert_to_quilt_precond(trustRegionCgSettings.preconditionerMethod))
+
+    delta = trSettings.delta0
 
     # propagate dirichlet bc info to stitch dofs
     Ushp = U.shape
@@ -147,7 +197,8 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
         energyBase = energy_func(U)
 
         f.close()
-        modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(cgSettings, linOp, g, delta, leftMost, dU)
+
+        modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, leftMost, dU)
         f = open(logfile, "a")
 
         f.write('trust region step norm = ' + str(np.linalg.norm(dU)) + ' after ' + str(trustIters) + ' cg iterations\n')
@@ -161,7 +212,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
 
         f.write('model vs real changes = ' + str(modelEnergyChange) + ' ' + str(incrementalEnergyChange) + '\n')
 
-        rho = incrementalEnergyChange / modelEnergyChange
+        rho = (incrementalEnergyChange - 1e-13) / (modelEnergyChange - 1e-13)
 
         if modelEnergyChange > 0:
             f.write('error: Found a positive model objective increase.  Debug if you see this.\n')
@@ -169,7 +220,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
             
         if not rho >= trSettings.eta2:  # write it this way to handle NaNs
             delta *= trSettings.t1
-        elif rho > trSettings.eta3 and np.linalg.norm(dU) > boundaryTolerance * delta:
+        elif rho > trSettings.eta3 and np.linalg.norm(dU) > trSettings.boundaryTolerance * delta:
             delta *= trSettings.t2
 
         gTrialNorm = np.linalg.norm(gTrial)
@@ -183,7 +234,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
             g = gTrial
             gNorm = gTrialNorm
             U = UTrial
-            if gNorm <= trTolerance:
+            if gNorm <= trustRegionCgSettings.trTolerance:
                 print('converged nonlinear problem\n\n')
                 break
 
@@ -196,7 +247,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
         else:
             f.write('rejecting trust region step ' + str(rho) + '\n\n')
 
-        if trustIters > maxCgItersToResetPrecond:
+        if trustIters > trustRegionCgSettings.maxCgItersToResetPrecond:
             print('updating preconditioner')
             f.write('updating preconditioner')
             f.close()
@@ -205,3 +256,5 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
 
     f.close()
     return U
+
+
