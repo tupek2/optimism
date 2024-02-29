@@ -3,6 +3,7 @@ import jax.numpy as np
 import numpy as onp
 import optimism.TensorMath as TensorMath
 from optimism.aggregation import Coarsening
+from optimism.Timer import timeme
 
 # data class
 from chex._src.dataclass import dataclass
@@ -134,13 +135,16 @@ def create_linear_operator(mesh, U, polyElems, polyNodes, poly_stiffness_func, d
 
 class PreconditionerMethod(Enum):
     JACOBI = 0
-    JACOBI_COARSE_JACOBI = 1
-    COARSE_JACOBI_COARSE = 2
+    COARSE = 1
+    JACOBI_COARSE_JACOBI = 2
+    COARSE_JACOBI_COARSE = 3
 
 
 def convert_to_quilt_precond(precondMethod : PreconditionerMethod):
     if precondMethod==PreconditionerMethod.JACOBI:
         return quilts.TrustRegionSettings.JACOBI
+    if precondMethod==PreconditionerMethod.COARSE:
+        return quilts.TrustRegionSettings.COARSE
     elif precondMethod==PreconditionerMethod.JACOBI_COARSE_JACOBI:
         return quilts.TrustRegionSettings.JACOBI_COARSE_JACOBI
     elif precondMethod==PreconditionerMethod.COARSE_JACOBI_COARSE:
@@ -152,61 +156,90 @@ def convert_to_quilt_precond(precondMethod : PreconditionerMethod):
 
 @dataclass(frozen=True, mappable_dataclass=True)
 class TrustRegionCgSettings:
-    cgTolerance = 1e-10
-    trTolerance = 2.5 * cgTolerance
-    maxCgIters = 60
-    maxCgItersToResetPrecond = 40
-    preconditionerMethod : PreconditionerMethod = PreconditionerMethod.JACOBI_COARSE_JACOBI
+    trTolerance = 1e-8
+    cgTolerance = 0.2 * trTolerance
+    maxCgIters = 50
+    maxCgItersToResetPrecond = 49
+    preconditionerMethod : PreconditionerMethod = PreconditionerMethod.COARSE
 
 
 @dataclass(frozen=True, mappable_dataclass=True)
 class TrustRegionSettings:
-    max_trust_iters=400
-    t1             = 0.4
-    t2             = 1.5
-    eta1           = 1e-6
-    eta2           = 0.2
-    eta3           = 0.8
-    boundaryTolerance = 0.9
-    delta0         = 1.0
+    #t1=0.25, t2=1.75, eta1=1e-10, eta2=0.1, eta3=0.5,
+    #             max_trust_iters=100
+    max_trust_iters   = 500
+    t1                = 0.25
+    t2                = 1.75
+    eta1              = 1e-9
+    eta2              = 0.1
+    eta3              = 0.55
+    boundaryTolerance = 0.95
+    delta0            = 3.0
     trustRegionCgSettings : TrustRegionCgSettings = TrustRegionCgSettings()
 
 
-def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp, energy_func, residual_func, trSettings : TrustRegionSettings):
+def update_stiffness(linOp : quilts.QuiltOperatorInterface, U, poly_stiffness_func, polyElems, polyNodes):
+    for iPoly, (pNodes, pElems) in enumerate(zip(polyNodes, polyElems)):
+                    pU = U[pNodes]
+                    nDofs = pU.size
+                    stiff_pp = poly_stiffness_func(pU, pNodes, pElems).reshape(nDofs,nDofs)
+                    linOp.update_poly_stiffness(iPoly , stiff_pp)
+
+
+def solve_nonlinear_problem(U, polyElems, polyNodes,
+                            poly_stiffness_func : callable,
+                            linOp : quilts.QuiltOperatorInterface,
+                            energy_func : callable,
+                            residual_func : callable, 
+                            trSettings : TrustRegionSettings):
     logfile = 'log.txt'
-    f = open(logfile, "w")
 
     trustRegionCgSettings = trSettings.trustRegionCgSettings
     quiltCgSettings = quilts.TrustRegionSettings(trustRegionCgSettings.cgTolerance, trustRegionCgSettings.maxCgIters,
                                                  convert_to_quilt_precond(trustRegionCgSettings.preconditionerMethod))
-
     delta = trSettings.delta0
 
-    # propagate dirichlet bc info to stitch dofs
-    Ushp = U.shape
-    U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
-    dU = 0.0*U.ravel()
+    f = open(logfile, "a")
+    print('updating preconditioner for warm start')
+    f.write('updating preconditioner for warm start\n')
+    f.close()
+    linOp.update_preconditioner()
 
+    dU = 0.0*U.ravel()
     g = residual_func(U)
     leftMost = g.copy()
 
-    gNorm = np.linalg.norm(g)
+    modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, 1e60, leftMost, dU)
+    Ushp = U.shape
+    U += dU.reshape(Ushp)
 
+    # propagate dirichlet bc info to stitch dofs
+    U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
+    g = residual_func(U)
+    gNorm = np.linalg.norm(g)
+    
+    update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+    f = open(logfile, "a")
+    print('updating preconditioner for first nonlinear iteration')
+    f.write('updating preconditioner for first nonlinear iteration\n')
+    f.close()
+    linOp.update_preconditioner()
+    modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, leftMost, dU)
+
+
+    f = open(logfile, "a")
     for trustIter in range(trSettings.max_trust_iters):
         f.write('delta = ' + str(delta)  + ' at iter ' + str(trustIter) + '\n')
-        energyBase = energy_func(U)
-
         f.close()
 
+        energyBase = energy_func(U)
         modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, leftMost, dU)
+        
         f = open(logfile, "a")
-
         f.write('trust region step norm = ' + str(np.linalg.norm(dU)) + ' after ' + str(trustIters) + ' cg iterations\n')
-        UTrial = U + dU.reshape(U.shape)
+        UTrial = U + dU.reshape(Ushp)
         gTrial = residual_func(UTrial)
 
-        #if settings.use_incremental_objective:
-        #incrementalEnergyChange = 0.5 * (dU @ (g+gTrial))
         energyTrial = energy_func(UTrial)
         incrementalEnergyChange = energyTrial - energyBase
 
@@ -234,25 +267,30 @@ def solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness_func, linOp,
             g = gTrial
             gNorm = gTrialNorm
             U = UTrial
-            if gNorm <= trustRegionCgSettings.trTolerance:
-                print('converged nonlinear problem\n\n')
-                break
 
-            for iPoly, (pNodes, pElems) in enumerate(zip(polyNodes, polyElems)):
-                pU = U[pNodes]
-                nDofs = pU.size
-                stiff_pp = poly_stiffness_func(pU, pNodes, pElems).reshape(nDofs,nDofs)
-                linOp.update_poly_stiffness(iPoly , stiff_pp)
+            # update even when converged to use as warm start stiffness for next step
+            # a bit of a waste of time at the last step, but checks for some negative eigenvalues anyways
+            update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+
+            if gNorm <= trustRegionCgSettings.trTolerance:
+                blurb = 'converged nonlinear problem\n\n'
+                print(blurb)
+                f.write(blurb)
+                break
 
         else:
             f.write('rejecting trust region step ' + str(rho) + '\n\n')
 
         if trustIters > trustRegionCgSettings.maxCgItersToResetPrecond:
             print('updating preconditioner')
-            f.write('updating preconditioner')
-            f.close()
-            linOp.update_preconditioner()
-            f = open(logfile, "a")
+            f.write('updating preconditioner\n')
+            f.close(); linOp.update_preconditioner(); f = open(logfile, "a")
+
+
+    if gNorm > trustRegionCgSettings.trTolerance:
+        blurb = 'unable to converge nonlinear problem in' + str(trSettings.max_trust_iters) + ' iterations\n'
+        print(blurb)
+        f.write(blurb)
 
     f.close()
     return U
