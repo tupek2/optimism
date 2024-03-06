@@ -157,9 +157,9 @@ def convert_to_quilt_precond(precondMethod : PreconditionerMethod):
 @dataclass(frozen=True, mappable_dataclass=True)
 class TrustRegionCgSettings:
     trTolerance = 1e-8
-    cgTolerance = 0.2 * trTolerance
-    maxCgIters = 50
-    maxCgItersToResetPrecond = 49
+    cgTolerance = 0.25 * trTolerance
+    maxCgIters = 30
+    maxCgItersToResetPrecond = 15
     preconditionerMethod : PreconditionerMethod = PreconditionerMethod.COARSE
 
 
@@ -168,13 +168,13 @@ class TrustRegionSettings:
     #t1=0.25, t2=1.75, eta1=1e-10, eta2=0.1, eta3=0.5,
     #             max_trust_iters=100
     max_trust_iters   = 500
-    t1                = 0.25
-    t2                = 1.75
+    t1                = 0.35
+    t2                = 1.65
     eta1              = 1e-9
-    eta2              = 0.1
-    eta3              = 0.55
+    eta2              = 0.2
+    eta3              = 0.51
     boundaryTolerance = 0.95
-    delta0            = 3.0
+    delta0            = 4.0
     trustRegionCgSettings : TrustRegionCgSettings = TrustRegionCgSettings()
 
 
@@ -229,6 +229,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
 
     f = open(logfile, "a")
     for trustIter in range(trSettings.max_trust_iters):
+        
         f.write('delta = ' + str(delta)  + ' at iter ' + str(trustIter) + '\n')
         f.close()
 
@@ -239,7 +240,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
         f.write('trust region step norm = ' + str(np.linalg.norm(dU)) + ' after ' + str(trustIters) + ' cg iterations\n')
         UTrial = U + dU.reshape(Ushp)
         gTrial = residual_func(UTrial)
-
+        gTrialNorm = np.linalg.norm(gTrial)
         energyTrial = energy_func(UTrial)
         incrementalEnergyChange = energyTrial - energyBase
 
@@ -256,18 +257,15 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
         elif rho > trSettings.eta3 and np.linalg.norm(dU) > trSettings.boundaryTolerance * delta:
             delta *= trSettings.t2
 
-        gTrialNorm = np.linalg.norm(gTrial)
-
         f.write('residual norm = ' + str(gTrialNorm) + '\n')
 
         willAccept = rho >= trSettings.eta1 or (rho >= -0 and gTrialNorm <= gNorm)
         if willAccept:
             print("accepting trust region solve after", trustIters, "iterations.")
             f.write('accepting trust region step\n\n')
+            U = UTrial
             g = gTrial
             gNorm = gTrialNorm
-            U = UTrial
-
             # update even when converged to use as warm start stiffness for next step
             # a bit of a waste of time at the last step, but checks for some negative eigenvalues anyways
             update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
@@ -279,7 +277,48 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
                 break
 
         else:
+            print("rejecting trust region solve after", trustIters, "iterations.")
             f.write('rejecting trust region step ' + str(rho) + '\n\n')
+
+            # lets do a quick linesearch 
+            goldenRatio = np.sqrt(0.61803398874989484820)
+            reductionFactor = goldenRatio
+
+            UTrial = U + reductionFactor * dU.reshape(Ushp)
+            gTrial = residual_func(UTrial)
+            gTrialNorm = np.linalg.norm(gTrial)
+            energyTrial = energy_func(UTrial)
+
+            incrementalEnergyChangeOld = incrementalEnergyChange
+            incrementalEnergyChange = energyTrial - energyBase
+
+            linesearchCount=0
+            while (not incrementalEnergyChange >= incrementalEnergyChangeOld):
+                linesearchCount+=1
+                reductionFactor *= goldenRatio
+                UTrial = U + reductionFactor * dU.reshape(Ushp)
+                gTrial = residual_func(UTrial)
+                gTrialNorm = np.linalg.norm(gTrial)
+                energyTrial = energy_func(UTrial)
+                
+                incrementalEnergyChangeOld = incrementalEnergyChange
+                incrementalEnergyChange = energyTrial - energyBase
+                f.write('trial energy drop = ' + str(incrementalEnergyChange) + '\n')
+
+            reductionFactor /= goldenRatio
+            dU *= reductionFactor
+            delta = np.sqrt(delta * np.linalg.norm(dU)) # geometric mean of trust region change and linesearch determined trust region size
+            U = U + dU.reshape(Ushp)
+            g = residual_func(U)
+            gNorm = np.linalg.norm(g)
+            energyAchieved = energy_func(U)
+
+            blurb = 'accepting linesearch and new delta after ' + str(linesearchCount) + ' steps, new delta = ' + str(delta) + '\n'
+            print(blurb)
+            f.write(blurb)
+            update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+
+            f.write('model vs real changes = ' + str(modelEnergyChange) + ' ' + str(energyAchieved - energyBase) + '\n')
 
         if trustIters > trustRegionCgSettings.maxCgItersToResetPrecond:
             print('updating preconditioner')
@@ -288,7 +327,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
 
 
     if gNorm > trustRegionCgSettings.trTolerance:
-        blurb = 'unable to converge nonlinear problem in' + str(trSettings.max_trust_iters) + ' iterations\n'
+        blurb = 'unable to converge nonlinear problem in ' + str(trSettings.max_trust_iters) + ' iterations\n'
         print(blurb)
         f.write(blurb)
 

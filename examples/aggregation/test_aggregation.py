@@ -3,6 +3,7 @@ from collections import namedtuple
 import numpy as onp
 import jax
 import jax.numpy as np
+
 # data class
 from chex._src.dataclass import dataclass
 from chex._src import pytypes
