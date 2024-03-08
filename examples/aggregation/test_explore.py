@@ -84,7 +84,7 @@ def create_objective(mesh, dispGuessWithBC,
 def minimize_objective(objective : Objective):
     solver = EqSolver.trust_region_minimize
     trSettings = EqSolver.get_settings(max_trust_iters=400, use_incremental_objective=False, t1=0.4, t2=1.5, eta1=1e-6, eta2=0.2, eta3=0.8, over_iters=100)
-    U = EqSolver.nonlinear_equation_solve(objective, objective.x0, objective.p, trSettings, useWarmStart=False, solver_algorithm=solver)
+    U, solverSuccess = EqSolver.nonlinear_equation_solve(objective, objective.x0, objective.p, trSettings, useWarmStart=False, solver_algorithm=solver)
     return U
 
 

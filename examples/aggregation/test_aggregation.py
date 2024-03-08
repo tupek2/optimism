@@ -312,7 +312,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         Uu_c = U_c[isCoarseUnknown]
 
         objective = Objective.Objective(energy, Uu_c, p, None) # linearize about... for preconditioner, warm start
-        Uu_c = EqSolver.nonlinear_equation_solve(objective, Uu_c, p, trSettings, useWarmStart=False, solver_algorithm=solver)
+        Uu_c, solverSuccess = EqSolver.nonlinear_equation_solve(objective, Uu_c, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
         U_c = U_c.at[isCoarseUnknown].set(Uu_c)
         return U_c
@@ -341,7 +341,7 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         p = Objective.Params(0.0, self.internals)
         objective = Objective.Objective(energy, UuGuess, p, None)
-        Uu = EqSolver.nonlinear_equation_solve(objective, UuGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
+        Uu, solverSuccess = EqSolver.nonlinear_equation_solve(objective, UuGuess, p, trSettings, useWarmStart=False, solver_algorithm=solver)
 
         U = dofManager.create_field(Uu, Ubc)
         return U
