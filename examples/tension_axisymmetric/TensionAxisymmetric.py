@@ -169,7 +169,7 @@ class AxisymmetricTension:
             print('LOAD STEP ', i, '\n')
             yDisp += maxDisp/N
             p = Objective.param_index_update(p, 0, yDisp)
-            Uu = EqSolver.nonlinear_equation_solve(objective, Uu, p, subProblemSettings)
+            Uu, solverSuccess = EqSolver.nonlinear_equation_solve(objective, Uu, p, subProblemSettings)
             
             internalVariables = self.mechanicsFunctions.\
                 compute_updated_internal_variables(self.create_field(Uu, p), p[1])
