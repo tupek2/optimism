@@ -96,7 +96,7 @@ def construct_aggregations(mesh, numParts, dofManager, allsidesets, dirichletSet
     return partitionElemField,activeNodes,polyElems,polyNodes,dofStatus
 
 
-def create_linear_operator(mesh, U, polyElems, polyNodes, poly_stiffness_func, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt):
+def create_linear_operator_and_trust_region_state(mesh, U, polyElems, polyNodes, poly_stiffness_func, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt):
     if allBoundaryInCoarse:
         dofStatus = np.where(dofStatus==-2, 1, dofStatus)
         wherePos = dofStatus>=0.0
@@ -130,7 +130,7 @@ def create_linear_operator(mesh, U, polyElems, polyNodes, poly_stiffness_func, d
             linOp.add_poly(polyDofs, pStiffness)
         linOp.finalize()
 
-    return linOp
+    return linOp, quilts.TrustRegionState(len(dofStatus))
 
 
 class PreconditionerMethod(Enum):
@@ -159,7 +159,8 @@ class TrustRegionCgSettings:
     trTolerance = 1e-8
     cgTolerance = 0.25 * trTolerance
     maxCgIters = 30
-    maxCgItersToResetPrecond = 15
+    maxCgItersToResetPrecond = 20
+    maxCumulativeCgItersToResetPrecond = 50
     preconditionerMethod : PreconditionerMethod = PreconditionerMethod.COARSE
 
 
@@ -191,7 +192,8 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
                             linOp : quilts.QuiltOperatorInterface,
                             energy_func : callable,
                             residual_func : callable, 
-                            trSettings : TrustRegionSettings):
+                            trSettings : TrustRegionSettings,
+                            trState : quilts.TrustRegionState):
     logfile = 'log.txt'
 
     trustRegionCgSettings = trSettings.trustRegionCgSettings
@@ -204,12 +206,14 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
     f.write('updating preconditioner for warm start\n')
     f.close()
     linOp.update_preconditioner()
+    trState.reset()
 
     dU = 0.0*U.ravel()
     g = residual_func(U)
-    leftMost = g.copy()
 
-    modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, 1e60, leftMost, dU)
+    # warm start
+    quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, 1e60, trState)
+    dU = trState.solution()
     Ushp = U.shape
     U += dU.reshape(Ushp)
 
@@ -224,8 +228,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
     f.write('updating preconditioner for first nonlinear iteration\n')
     f.close()
     linOp.update_preconditioner()
-    modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, leftMost, dU)
-
+    trState.reset()
 
     f = open(logfile, "a")
     for trustIter in range(trSettings.max_trust_iters):
@@ -234,8 +237,12 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
         f.close()
 
         energyBase = energy_func(U)
-        modelEnergyChange, trustIters, isOnBoundary = quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, leftMost, dU)
+        quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, trState)
         
+        dU = trState.solution()
+        modelEnergyChange = trState.model_energy_change()
+        trustIters = trState.num_iterations()
+
         f = open(logfile, "a")
         f.write('trust region step norm = ' + str(np.linalg.norm(dU)) + ' after ' + str(trustIters) + ' cg iterations\n')
         UTrial = U + dU.reshape(Ushp)
@@ -320,10 +327,11 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
 
             f.write('model vs real changes = ' + str(modelEnergyChange) + ' ' + str(energyAchieved - energyBase) + '\n')
 
-        if trustIters > trustRegionCgSettings.maxCgItersToResetPrecond:
+        if trustIters > trustRegionCgSettings.maxCgItersToResetPrecond or trState.num_cumulative_iterations() > trustRegionCgSettings.maxCumulativeCgItersToResetPrecond:
             print('updating preconditioner')
             f.write('updating preconditioner\n')
             f.close(); linOp.update_preconditioner(); f = open(logfile, "a")
+            trState.reset()
 
 
     if gNorm > trustRegionCgSettings.trTolerance:
