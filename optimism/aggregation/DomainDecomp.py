@@ -178,22 +178,79 @@ class TrustRegionSettings:
     delta0            = 4.0
     trustRegionCgSettings : TrustRegionCgSettings = TrustRegionCgSettings()
 
-
+@timeme
 def update_stiffness(linOp : quilts.QuiltOperatorInterface, U, poly_stiffness_func, polyElems, polyNodes):
     for iPoly, (pNodes, pElems) in enumerate(zip(polyNodes, polyElems)):
-                    pU = U[pNodes]
-                    nDofs = pU.size
-                    stiff_pp = poly_stiffness_func(pU, pNodes, pElems).reshape(nDofs,nDofs)
-                    linOp.update_poly_stiffness(iPoly , stiff_pp)
+        pU = U[pNodes]
+        nDofs = pU.size
+        stiff_pp = poly_stiffness_func(pU, pNodes, pElems).reshape(nDofs,nDofs)
+        linOp.update_poly_stiffness(iPoly , stiff_pp)
+
+
+@timeme
+def linesearch_back(U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, delta, f):
+    # lets do a quick linesearch 
+    goldenRatio = np.sqrt(0.61803398874989484820)
+
+    UTrial = U + dU.reshape(U.shape)
+
+    incrementalEnergyChangeOld = incrementalEnergyChange + 1 # always trigger at least 1 iteration, really should always be at least 2.
+    linesearchCount=0
+    while ( (not incrementalEnergyChange <= 0) or (not incrementalEnergyChange >= incrementalEnergyChangeOld)): #incrementalEnergyChange < incrementalEnergyChangeOld
+        linesearchCount+=1
+        reductionFactor = np.power(goldenRatio, linesearchCount)
+
+        Usave = UTrial
+        deltaNewsave = np.linalg.norm(dU)
+        energyAchievedsave = energyTrial
+        # modelEnergyChange = trState.model_energy_change()
+
+        quilts.solve_subspace_problem(reductionFactor * delta, trState)
+        dU = trState.solution()
+        f.write('step norm, delta target = ' + str(np.linalg.norm(dU)) + ' ' + str(reductionFactor * delta) + '\n')
+        UTrial = U + dU.reshape(U.shape)
+        energyTrial = energy_func(UTrial)
+        
+        incrementalEnergyChangeOld = incrementalEnergyChange
+        incrementalEnergyChange = energyTrial - energyBase
+
+        f.write('trial energy drop = ' + str(incrementalEnergyChange) + '\n')
+
+    return Usave, deltaNewsave, energyAchievedsave, linesearchCount
 
 
 def solve_nonlinear_problem(U, polyElems, polyNodes,
                             poly_stiffness_func : callable,
                             linOp : quilts.QuiltOperatorInterface,
-                            energy_func : callable,
-                            residual_func : callable, 
+                            energy_f : callable,
+                            residual_f : callable, 
                             trSettings : TrustRegionSettings,
                             trState : quilts.TrustRegionState):
+
+    @timeme
+    def energy_func(U): return energy_f(U)
+
+    @timeme
+    def residual_func(U): return residual_f(U)
+
+    @timeme
+    def update_preconditioner(linOp, trState):
+      linOp.update_preconditioner()
+      trState.reset()
+
+    @timeme
+    def warm_start_solve(U, cgSettings, linOp, g, trState):
+      quilts.solve_trust_region_model_problem(cgSettings, linOp, g, 1e100, trState)
+      dU = trState.solution()
+      U += dU.reshape(U.shape)
+      U = linOp.set_dirichlet_values(U.ravel()).reshape(U.shape)
+      return U
+    
+    @timeme
+    def model_problem_solve(cgSettings, linOp, g, delta, trState):
+      quilts.solve_trust_region_model_problem(cgSettings, linOp, g, delta, trState)
+      return trState.solution()
+
     logfile = 'log.txt'
 
     trustRegionCgSettings = trSettings.trustRegionCgSettings
@@ -201,34 +258,27 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
                                                  convert_to_quilt_precond(trustRegionCgSettings.preconditionerMethod))
     delta = trSettings.delta0
 
+
     f = open(logfile, "a")
     print('updating preconditioner for warm start')
     f.write('updating preconditioner for warm start\n')
     f.close()
-    linOp.update_preconditioner()
-    trState.reset()
+    update_preconditioner(linOp, trState)
 
-    dU = 0.0*U.ravel()
     g = residual_func(U)
-
-    # warm start
-    quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, 1e60, trState)
-    dU = trState.solution()
-    Ushp = U.shape
-    U += dU.reshape(Ushp)
+    U = warm_start_solve(U, quiltCgSettings, linOp, g, trState)
 
     # propagate dirichlet bc info to stitch dofs
-    U = linOp.set_dirichlet_values(U.ravel()).reshape(Ushp)
     g = residual_func(U)
     gNorm = np.linalg.norm(g)
     
     update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+
     f = open(logfile, "a")
     print('updating preconditioner for first nonlinear iteration')
     f.write('updating preconditioner for first nonlinear iteration\n')
     f.close()
-    linOp.update_preconditioner()
-    trState.reset()
+    update_preconditioner(linOp, trState)
 
     f = open(logfile, "a")
     for trustIter in range(trSettings.max_trust_iters):
@@ -237,15 +287,13 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
         f.close()
 
         energyBase = energy_func(U)
-        quilts.solve_trust_region_model_problem(quiltCgSettings, linOp, g, delta, trState)
-        
-        dU = trState.solution()
+        dU = model_problem_solve(quiltCgSettings, linOp, g, delta, trState)
         modelEnergyChange = trState.model_energy_change()
         trustIters = trState.num_iterations()
 
         f = open(logfile, "a")
         f.write('trust region step norm = ' + str(np.linalg.norm(dU)) + ' after ' + str(trustIters) + ' cg iterations\n')
-        UTrial = U + dU.reshape(Ushp)
+        UTrial = U + dU.reshape(U.shape)
         gTrial = residual_func(UTrial)
         gTrialNorm = np.linalg.norm(gTrial)
         energyTrial = energy_func(UTrial)
@@ -285,53 +333,36 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
 
         else:
             print("rejecting trust region solve after", trustIters, "iterations.")
-            f.write('rejecting trust region step ' + str(rho) + '\n\n')
+            f.write('rejecting trust region step, rho = ' + str(rho) + '\n\n')
 
-            # lets do a quick linesearch 
-            goldenRatio = np.sqrt(0.61803398874989484820)
-            reductionFactor = goldenRatio
+            U, deltaNew, energyAchieved, linesearchCount = linesearch_back(U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, delta / trSettings.t1, f)
 
-            UTrial = U + reductionFactor * dU.reshape(Ushp)
-            gTrial = residual_func(UTrial)
-            gTrialNorm = np.linalg.norm(gTrial)
-            energyTrial = energy_func(UTrial)
-
-            incrementalEnergyChangeOld = incrementalEnergyChange
-            incrementalEnergyChange = energyTrial - energyBase
-
-            linesearchCount=0
-            while (not incrementalEnergyChange >= incrementalEnergyChangeOld):
-                linesearchCount+=1
-                reductionFactor *= goldenRatio
-                UTrial = U + reductionFactor * dU.reshape(Ushp)
-                gTrial = residual_func(UTrial)
-                gTrialNorm = np.linalg.norm(gTrial)
-                energyTrial = energy_func(UTrial)
-                
-                incrementalEnergyChangeOld = incrementalEnergyChange
-                incrementalEnergyChange = energyTrial - energyBase
-                f.write('trial energy drop = ' + str(incrementalEnergyChange) + '\n')
-
-            reductionFactor /= goldenRatio
-            dU *= reductionFactor
-            delta = np.sqrt(delta * np.linalg.norm(dU)) # geometric mean of trust region change and linesearch determined trust region size
-            U = U + dU.reshape(Ushp)
             g = residual_func(U)
             gNorm = np.linalg.norm(g)
-            energyAchieved = energy_func(U)
+            update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+
+            if gNorm <= trustRegionCgSettings.trTolerance:
+                blurb = 'converged nonlinear problem\n\n'
+                print(blurb)
+                f.write(blurb)
+                break
+
+            delta = np.sqrt(delta * deltaNew) # geometric mean of trust region change and linesearch determined trust region size
 
             blurb = 'accepting linesearch and new delta after ' + str(linesearchCount) + ' steps, new delta = ' + str(delta) + '\n'
             print(blurb)
             f.write(blurb)
-            update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
 
             f.write('model vs real changes = ' + str(modelEnergyChange) + ' ' + str(energyAchieved - energyBase) + '\n')
+
+        #print('cumulative cg iterations =', trState.num_cumulative_iterations())
 
         if trustIters > trustRegionCgSettings.maxCgItersToResetPrecond or trState.num_cumulative_iterations() > trustRegionCgSettings.maxCumulativeCgItersToResetPrecond:
             print('updating preconditioner')
             f.write('updating preconditioner\n')
-            f.close(); linOp.update_preconditioner(); f = open(logfile, "a")
-            trState.reset()
+            f.close()
+            update_preconditioner(linOp, trState)
+            f = open(logfile, "a")
 
 
     if gNorm > trustRegionCgSettings.trTolerance:
