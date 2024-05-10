@@ -16,4 +16,3 @@ def assemble_sparse_stiffness_matrix(kValues, conns, dofManager):
      K = coo_matrix((kValues[dofManager.hessian_bc_mask], (dofManager.HessRowCoords, dofManager.HessColCoords)), shape = (nUnknowns, nUnknowns))
      return K.tocsc()
 
-

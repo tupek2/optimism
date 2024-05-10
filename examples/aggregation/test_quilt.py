@@ -19,21 +19,21 @@ from optimism.FunctionSpace import DofManager
 # physics stuff
 import optimism.QuadratureRule as QuadratureRule
 import optimism.FunctionSpace as FunctionSpace
-from optimism.material import Neohookean as MatModel
-#from optimism.material import LinearElastic as MatModel
+#from optimism.material import Neohookean as MatModel
+from optimism.material import LinearElastic as MatModel
 from optimism import Mechanics
-
+from optimism import SparseMatrixAssembler
 
 class PolyPatchTest(MeshFixture.MeshFixture):
     
     def setUp(self):
-        #self.Nx = 4
-        #self.Ny = 3
-        #self.numParts = 2
+        self.Nx = 5
+        self.Ny = 4
+        self.numParts = 3
 
-        self.Nx = 40
-        self.Ny = 8
-        self.numParts = 16
+        #self.Nx = 40
+        #self.Ny = 8
+        #self.numParts = 16
 
         #self.Nx = 21
         #self.Ny = 8
@@ -61,8 +61,9 @@ class PolyPatchTest(MeshFixture.MeshFixture):
         self.quadRule = QuadratureRule.create_quadrature_rule_on_triangle(degree=1)
         self.fs = FunctionSpace.construct_function_space(self.mesh, self.quadRule)
 
-        self.setup='bending' # dirichlet_patch, neumann_patch
-        #self.setup='neumann_patch' # dirichlet_patch, neumann_patch
+        #self.setup='bending'
+        #self.setup='neumann_patch'
+        self.setup='dirichlet_patch'
 
         if self.setup=='bending':
           #traction_func = lambda x, n: np.array([0.0, 0.01])
@@ -124,16 +125,57 @@ class PolyPatchTest(MeshFixture.MeshFixture):
 
         U = dofManager.create_field(0.0 * dofManager.get_unknown_values(self.dispTarget), dofManager.get_bc_values(self.dispTarget))
 
+
         allsidesets = ['all_boundary']
         partitionElemField, activeNodes, polyElems, polyNodes, dofStatus = DomainDecomp.construct_aggregations(self.mesh, self.numParts, dofManager, allsidesets, dirichletSets)
 
         poly_energy = lambda pU, pNodes, pElems : DomainDecomp.fine_poly_energy(self.mesh, self.fs, self.materialModel, pU, U, self.internals, pElems, pNodes)
-        poly_stiffness = jax.jit(jax.hessian(poly_energy,0))
+
+
+        #gNodeTopNodes = []
+        for pElems, pNodes in zip(polyElems, polyNodes):
+          #gNodeTopNode = { p : i for i, p in enumerate(pNodes.tolist()) }
+          #gNodeTopNodes.append(gNodeTopNode)
+          gNodeTopNode = np.zeros(self.mesh.coords.shape[0], dtype=int)
+          gNodeTopNode = gNodeTopNode.at[pNodes].set(np.arange(pNodes.shape[0], dtype=int))
+          Up = U[pNodes]
+          shapeGradsp = self.fs.shapeGrads[pElems]
+          vols = self.fs.vols[pElems]
+          conns = self.mesh.conns[pElems]
+          connsLocal = jax.vmap(lambda elemNodes : gNodeTopNode[elemNodes])(conns)
+          stateVarsp = self.internals[pElems]
+          elDisp = Up[connsLocal,:]
+          Kstiffness = jax.hessian(DomainDecomp.poly_subtet_energy, 0)
+          Ks = jax.vmap(Kstiffness, (0,0,0,0,None,None))(elDisp, stateVarsp, shapeGradsp, vols, np.arange(3), self.materialModel)
+          funnyDofManager = FunctionSpace.DofManagerBetter(Up.shape[0], connsLocal, 2)
+          polyK = SparseMatrixAssembler.assemble_sparse_stiffness_matrix(Ks, connsLocal, funnyDofManager)
+
+
+        def poly_stiffness(pU, pNodes, pElems):
+          gNodeTopNode = np.zeros(self.mesh.coords.shape[0], dtype=int)
+          gNodeTopNode = gNodeTopNode.at[pNodes].set(np.arange(pNodes.shape[0], dtype=int))
+
+          shapeGradsp = self.fs.shapeGrads[pElems]
+          vols = self.fs.vols[pElems]
+          conns = self.mesh.conns[pElems]
+          connsLocal = jax.vmap(lambda elemNodes : gNodeTopNode[elemNodes])(conns)
+          stateVarsp = self.internals[pElems]
+
+          elDisp = pU[connsLocal,:]
+
+          Kstiffness = jax.hessian(DomainDecomp.poly_subtet_energy, 0)
+          Ks = jax.vmap(Kstiffness, (0,0,0,0,None,None))(elDisp, stateVarsp, shapeGradsp, vols, np.arange(3), self.materialModel)
+
+          funnyDofManager = FunctionSpace.DofManagerBetter(pU.shape[0], connsLocal, 2)
+          polyK = SparseMatrixAssembler.assemble_sparse_stiffness_matrix(Ks, connsLocal, funnyDofManager)
+
+          return polyK.todense()
+
 
         allBoundaryInCoarse = True
         noInteriorDofs = False
         useQuilt = True # alternative is BDDC
-        linOp = DomainDecomp.create_linear_operator(self.mesh, U, polyElems, polyNodes, poly_stiffness, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt)
+        linOp, trState = DomainDecomp.create_linear_operator_and_trust_region_state(self.mesh, U, polyElems, polyNodes, poly_stiffness, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt)
 
         def energy(Ut):
             return self.compute_energy(Ut, self.internals) + self.external_energy_function(Ut)
@@ -143,15 +185,29 @@ class PolyPatchTest(MeshFixture.MeshFixture):
             g = np.where(dofStatus.reshape(g.shape) < -100, 0.0, g)
             return g
         
+        g0 = residual(U)
+
+        if False:
+            partitionStiffnesses = [poly_stiffness(U[pNodes], pNodes, pElems) for pNodes, pElems in zip(polyNodes, polyElems)]
+            print('global dof status = ', dofStatus)
+            DomainDecomp.write_matrix(partitionStiffnesses, polyNodes, dofStatus, -g0, self.mesh.coords)
+            output_mesh_and_fields('patch', self.mesh, 
+                                scalarElemFields = [('partition', partitionElemField)],
+                                scalarNodalFields = [('active', activeNodes)],
+                                vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),
+                                                      ('dof_status', dofStatus.reshape(U.shape))])
+            #exit(1)
+
         trSettings = DomainDecomp.TrustRegionSettings
-        U = DomainDecomp.solve_nonlinear_problem(U, polyElems, polyNodes, poly_stiffness, linOp, energy, residual, trSettings)
-             
-        dofStatus = dofStatus.reshape(U.shape) # readable dofstatus
+        U = DomainDecomp.solve_nonlinear_problem(poly_energy, dofManager, self.mesh, U, polyElems, polyNodes, poly_stiffness, linOp, energy, residual, trSettings, trState)
+          
+        print(U)
+
         output_mesh_and_fields('patch', self.mesh, 
                                scalarElemFields = [('partition', partitionElemField)],
                                scalarNodalFields = [('active', activeNodes)],
                                vectorNodalFields = [('disp', U), ('disp_target', self.dispTarget),
-                                                    ('dof_status', dofStatus)])
+                                                    ('dof_status', dofStatus.reshape(U.shape))])
 
 
 if __name__ == '__main__':

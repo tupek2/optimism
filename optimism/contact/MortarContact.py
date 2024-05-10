@@ -32,7 +32,6 @@ def eval_linear_field_on_edge(field, xi):
 def smooth_linear(xi, l):                
     return jnp.where( xi < l, 0.5*xi*xi/l, jnp.where(xi > 1.0-l, 1.0-l-0.5*(1.0-xi)*(1.0-xi)/l, xi-0.5*l) )
 
-
 # some actual mortar integrals
 
 def compute_intersection(edgeA, edgeB, f_common_normal):

@@ -95,8 +95,9 @@ def construct_aggregations(mesh, numParts, dofManager, allsidesets, dirichletSet
 
     return partitionElemField,activeNodes,polyElems,polyNodes,dofStatus
 
-
+@timeme
 def create_linear_operator_and_trust_region_state(mesh, U, polyElems, polyNodes, poly_stiffness_func, dofStatus, allBoundaryInCoarse, noInteriorDofs, useQuilt):
+    print('making lin op')
     if allBoundaryInCoarse:
         dofStatus = np.where(dofStatus==-2, 1, dofStatus)
         wherePos = dofStatus>=0.0
@@ -110,17 +111,20 @@ def create_linear_operator_and_trust_region_state(mesh, U, polyElems, polyNodes,
         dofStatus = dofStatus.at[wherePos].set(np.arange(numActive))
 
     if useQuilt:
+        print('use quilt')
         linOp = quilts.QuiltOperatorSym(dofStatus, DIRICHLET_INDEX)
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
             nDofs = pU.size
             polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
-            stiff_pp = poly_stiffness_func(pU, pNodes, pElems).reshape(nDofs,nDofs)
+            stiff_pp = poly_stiffness_func(pU, pNodes, pElems) #.reshape(nDofs,nDofs)
             polyX = mesh.coords[pNodes,0]; polyX = np.stack((polyX, polyX), axis=1).ravel()
             polyY = mesh.coords[pNodes,1]; polyY = np.stack((polyY, polyY), axis=1).ravel()
             linOp.add_poly(polyDofs, stiff_pp, polyX, polyY)
         linOp.finalize()
+        print("done")
     else:
+        print('not use quilt')
         linOp = quilts.BddcOperatorSym(dofStatus, True, DIRICHLET_INDEX)
         for pNodes, pElems in zip(polyNodes, polyElems):
             pU = U[pNodes]
@@ -158,9 +162,9 @@ def convert_to_quilt_precond(precondMethod : PreconditionerMethod):
 class TrustRegionCgSettings:
     trTolerance = 1e-8
     cgTolerance = 0.25 * trTolerance
-    maxCgIters = 30
-    maxCgItersToResetPrecond = 20
-    maxCumulativeCgItersToResetPrecond = 50
+    maxCgIters = 40
+    maxCgItersToResetPrecond = 15 # 20
+    maxCumulativeCgItersToResetPrecond = 10
     preconditionerMethod : PreconditionerMethod = PreconditionerMethod.COARSE
 
 
@@ -179,20 +183,48 @@ class TrustRegionSettings:
     trustRegionCgSettings : TrustRegionCgSettings = TrustRegionCgSettings()
 
 @timeme
-def update_stiffness(linOp : quilts.QuiltOperatorInterface, U, poly_stiffness_func, polyElems, polyNodes):
+def update_stiffness(mesh, iter, linOp : quilts.QuiltOperatorInterface, trState : quilts.TrustRegionState, U, poly_stiffness_f, polyElems, polyNodes):
+    #@timeme
+    #def poly_stiffness_func(pU, pNodes, pElems): return poly_stiffness_f(pU, pNodes, pElems)
+    poly_stiffness_func = poly_stiffness_f
+
     for iPoly, (pNodes, pElems) in enumerate(zip(polyNodes, polyElems)):
-        pU = U[pNodes]
-        nDofs = pU.size
-        stiff_pp = poly_stiffness_func(pU, pNodes, pElems).reshape(nDofs,nDofs)
+        stiff_pp = poly_stiffness_func(U[pNodes], pNodes, pElems)
         linOp.update_poly_stiffness(iPoly , stiff_pp)
 
+    #return iter+1
+
+from optimism import VTKWriter
+from scipy.linalg import eigh
+
+ls_outer_count = 0
 
 @timeme
-def linesearch_back(U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, delta, f):
+def linesearch_back(objective, dof_manager, mesh, U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, delta, f):
+    global ls_outer_count
+    ls_outer_count = ls_outer_count + 1
     # lets do a quick linesearch 
     goldenRatio = np.sqrt(0.61803398874989484820)
 
     UTrial = U + dU.reshape(U.shape)
+
+    ### start of expensive eigen stuff
+
+    if (False):
+        def get_ubcs():
+                V = np.zeros(mesh.coords.shape)
+                return 0.0*dof_manager.get_bc_values(V)
+
+        Uu = dof_manager.get_unknown_values(U)
+        H = objective.hessian(Uu)
+        print('h shape = ', H.shape)
+        evals_small, evecs_small = eigh(H, eigvals=(0,0))
+        print('vHv = ', evecs_small.T@H@evecs_small)
+        evecFull = dof_manager.create_field(evecs_small, get_ubcs())
+
+    ### end of expensive eigen stuff
+
+    leftmost = trState.leftmost()
 
     incrementalEnergyChangeOld = incrementalEnergyChange + 1 # always trigger at least 1 iteration, really should always be at least 2.
     linesearchCount=0
@@ -211,6 +243,13 @@ def linesearch_back(U, dU, trState, energy_func, energyTrial, incrementalEnergyC
         UTrial = U + dU.reshape(U.shape)
         energyTrial = energy_func(UTrial)
         
+        #writer = VTKWriter.VTKWriter(mesh, f"ls-{ls_outer_count:03d}-{linesearchCount:03d}")
+        #writer.add_nodal_field("displacement", U, VTKWriter.VTKFieldType.VECTORS)
+        #writer.add_nodal_field("disp_inc", dU.reshape(U.shape), VTKWriter.VTKFieldType.VECTORS)
+        #writer.add_nodal_field("leftmost", leftmost.reshape(U.shape), VTKWriter.VTKFieldType.VECTORS)
+        #writer.add_nodal_field("mineigval", evecFull.reshape(U.shape), VTKWriter.VTKFieldType.VECTORS)
+        #writer.write()
+
         incrementalEnergyChangeOld = incrementalEnergyChange
         incrementalEnergyChange = energyTrial - energyBase
 
@@ -219,7 +258,52 @@ def linesearch_back(U, dU, trState, energy_func, energyTrial, incrementalEnergyC
     return Usave, deltaNewsave, energyAchievedsave, linesearchCount
 
 
-def solve_nonlinear_problem(U, polyElems, polyNodes,
+@timeme
+def linesearch_forward(mesh, U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, delta, f):
+    # lets do a quick linesearch 
+    goldenRatio = np.sqrt(1.61803398874989484820)
+
+    UTrial = U + dU.reshape(U.shape)
+
+    canDoBetter = True
+
+    incrementalEnergyChangeOld = incrementalEnergyChange + 1 # always trigger at least 1 iteration, really should always be at least 2.
+    linesearchCount=0
+    while (canDoBetter):
+        linesearchCount+=1
+        reductionFactor = np.power(goldenRatio, linesearchCount)
+
+        Usave = UTrial
+        deltaNewsave = np.linalg.norm(dU)
+        energyAchievedsave = energyTrial
+        # modelEnergyChange = trState.model_energy_change()
+
+        quilts.solve_subspace_problem(reductionFactor * delta, trState)
+        dU = trState.solution()
+        duNorm = np.linalg.norm(dU)
+        f.write('step norm, delta target = ' + str(duNorm) + ' ' + str(reductionFactor * delta) + '\n')
+        UTrial = U + dU.reshape(U.shape)
+        energyTrial = energy_func(UTrial)
+        
+        #writer = VTKWriter.VTKWriter(mesh, f"ls-{linesearchCount:03d}")
+        #writer.add_nodal_field("displacement", UTrial, VTKWriter.VTKFieldType.VECTORS)
+        #writer.write()
+
+        incrementalEnergyChangeOld = incrementalEnergyChange
+        incrementalEnergyChange = energyTrial - energyBase
+
+        canDoBetter = (not incrementalEnergyChange >= incrementalEnergyChangeOld)
+
+        if reductionFactor * delta > goldenRatio * duNorm:
+            canDoBetter = False
+
+        f.write('trial energy drop = ' + str(incrementalEnergyChange) + '\n')
+
+    return Usave, deltaNewsave, energyAchievedsave, linesearchCount
+
+
+@timeme
+def solve_nonlinear_problem(objective, dofManager, mesh, U, polyElems, polyNodes,
                             poly_stiffness_func : callable,
                             linOp : quilts.QuiltOperatorInterface,
                             energy_f : callable,
@@ -227,16 +311,26 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
                             trSettings : TrustRegionSettings,
                             trState : quilts.TrustRegionState):
 
-    @timeme
+    #@timeme
     def energy_func(U): return energy_f(U)
 
-    @timeme
+    #@timeme
     def residual_func(U): return residual_f(U)
 
     @timeme
-    def update_preconditioner(linOp, trState):
-      linOp.update_preconditioner()
+    def update_preconditioner(linOp, trState, U, iter):
+      linOp.update_preconditioner(trState)
       trState.reset()
+
+      writer = VTKWriter.VTKWriter(mesh, f"opt-{iter:03d}")
+      leftmost = trState.leftmost()
+      print('leftmost norm after stiffness update')
+      writer.add_nodal_field("displacement", U, VTKWriter.VTKFieldType.VECTORS)
+      writer.add_nodal_field("leftmost", leftmost.reshape(U.shape), VTKWriter.VTKFieldType.VECTORS)
+      #writer.add_nodal_field("mineigval", evecFull.reshape(U.shape), VTKWriter.VTKFieldType.VECTORS)
+      writer.write()
+      return iter+1
+
 
     @timeme
     def warm_start_solve(U, cgSettings, linOp, g, trState):
@@ -258,28 +352,27 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
                                                  convert_to_quilt_precond(trustRegionCgSettings.preconditionerMethod))
     delta = trSettings.delta0
 
-
     f = open(logfile, "a")
     print('updating preconditioner for warm start')
     f.write('updating preconditioner for warm start\n')
     f.close()
-    update_preconditioner(linOp, trState)
 
+    iter = 0
+    iter = update_preconditioner(linOp, trState, U, iter)
     g = residual_func(U)
     U = warm_start_solve(U, quiltCgSettings, linOp, g, trState)
-
     # propagate dirichlet bc info to stitch dofs
     g = residual_func(U)
     gNorm = np.linalg.norm(g)
-    
-    update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+
+    update_stiffness(mesh, iter, linOp, trState, U, poly_stiffness_func, polyElems, polyNodes)
 
     f = open(logfile, "a")
     print('updating preconditioner for first nonlinear iteration')
     f.write('updating preconditioner for first nonlinear iteration\n')
     f.close()
-    update_preconditioner(linOp, trState)
-
+    iter = update_preconditioner(linOp, trState, U, iter)
+ 
     f = open(logfile, "a")
     for trustIter in range(trSettings.max_trust_iters):
         
@@ -306,7 +399,8 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
         if modelEnergyChange > 0:
             f.write('error: Found a positive model objective increase.  Debug if you see this.\n')
             rho = -rho
-            
+        
+        deltaOld = delta
         if not rho >= trSettings.eta2:  # write it this way to handle NaNs
             delta *= trSettings.t1
         elif rho > trSettings.eta3 and np.linalg.norm(dU) > trSettings.boundaryTolerance * delta:
@@ -316,14 +410,27 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
 
         willAccept = rho >= trSettings.eta1 or (rho >= -0 and gTrialNorm <= gNorm)
         if willAccept:
+            
             print("accepting trust region solve after", trustIters, "iterations.")
             f.write('accepting trust region step\n\n')
+            
+            if trState.solution_is_on_boundary():
+                UTrial, deltaNew, energyAchieved, linesearchCount = linesearch_forward(mesh, U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, deltaOld, f)
+                gTrial = residual_func(UTrial)
+                gTrialNorm = np.linalg.norm(gTrial)
+                delta = np.sqrt(delta * deltaNew)
+
+                blurb = 'accepting linesearch and new delta after ' + str(linesearchCount) + ' steps, new delta = ' + str(delta) + '\n'
+                print(blurb)
+                f.write(blurb)
+                f.write('model vs real changes = ' + str(modelEnergyChange) + ' ' + str(energyAchieved - energyBase) + '\n')
+
             U = UTrial
             g = gTrial
             gNorm = gTrialNorm
             # update even when converged to use as warm start stiffness for next step
             # a bit of a waste of time at the last step, but checks for some negative eigenvalues anyways
-            update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+            update_stiffness(mesh, iter, linOp, trState, U, poly_stiffness_func, polyElems, polyNodes)
 
             if gNorm <= trustRegionCgSettings.trTolerance:
                 blurb = 'converged nonlinear problem\n\n'
@@ -335,11 +442,10 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
             print("rejecting trust region solve after", trustIters, "iterations.")
             f.write('rejecting trust region step, rho = ' + str(rho) + '\n\n')
 
-            U, deltaNew, energyAchieved, linesearchCount = linesearch_back(U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, delta / trSettings.t1, f)
-
+            U, deltaNew, energyAchieved, linesearchCount = linesearch_back(objective, dofManager, mesh, U, dU, trState, energy_func, energyTrial, incrementalEnergyChange, energyBase, deltaOld, f)
             g = residual_func(U)
             gNorm = np.linalg.norm(g)
-            update_stiffness(linOp, U, poly_stiffness_func, polyElems, polyNodes)
+            update_stiffness(mesh, iter, linOp, trState, U, poly_stiffness_func, polyElems, polyNodes)
 
             if gNorm <= trustRegionCgSettings.trTolerance:
                 blurb = 'converged nonlinear problem\n\n'
@@ -352,7 +458,6 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
             blurb = 'accepting linesearch and new delta after ' + str(linesearchCount) + ' steps, new delta = ' + str(delta) + '\n'
             print(blurb)
             f.write(blurb)
-
             f.write('model vs real changes = ' + str(modelEnergyChange) + ' ' + str(energyAchieved - energyBase) + '\n')
 
         #print('cumulative cg iterations =', trState.num_cumulative_iterations())
@@ -361,7 +466,7 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
             print('updating preconditioner')
             f.write('updating preconditioner\n')
             f.close()
-            update_preconditioner(linOp, trState)
+            iter = update_preconditioner(linOp, trState, U, iter)
             f = open(logfile, "a")
 
 
@@ -374,3 +479,37 @@ def solve_nonlinear_problem(U, polyElems, polyNodes,
     return U
 
 
+def write_matrix(partitionStiffnesses, polyNodes, dofStatus, rhs, coords):
+    f = open('mat.mat', 'w')
+    f.write('num_polys = ' + str(len(polyNodes)) + '\n')
+    for pNodes, pK in zip(polyNodes, partitionStiffnesses):
+        
+        polyDofs = np.stack((2*pNodes,2*pNodes+1), axis=1).ravel()
+        numDofs = len(polyDofs)
+        pK = pK.reshape(numDofs, numDofs)
+        f.write('dofs_per_poly = ' + str(numDofs) + '\n')
+        f.write(' '.join([str(p) for p in polyDofs]) + '\n')
+        f.write(' '.join([str(d) for d in dofStatus[polyDofs]]) + '\n')
+
+        triplets = []
+        for i in range(numDofs):
+            diagVal = pK[i,i]
+            for j in range(numDofs):
+                if np.abs(pK[i,j]) > 1e-15 * diagVal:
+                    triplets.append((i,j,pK[i,j]))
+
+        tripletStrings = [str(tri[0]) + ' ' + str(tri[1]) + ' ' + str(tri[2]) for tri in triplets]
+
+        f.write('num_nonzero = ' + str(len(triplets)) + '\n')
+
+        line = tripletStrings[0]
+        for tri in tripletStrings[1:]:
+          line += ' ' + tri
+
+        f.write(line + '\n')
+
+    f.write('num_rhs_dofs = ' + str(len(rhs)) + '\n')
+    f.write(' '.join([str(r) for r in rhs]) + '\n')
+    f.write(' '.join([str(r) for r in dofStatus]) + '\n')
+    f.write(' '.join([str(r) for r in coords.ravel()]) + '\n')
+    f.close()

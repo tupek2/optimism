@@ -605,3 +605,88 @@ def nonlinear_equation_solve(objective, x0, p, settings,
     
     return objective.invScaling * xBar, solverSuccess
     
+
+def dynamic_minimize(objective, x, settings, callback=None):
+    trSize = settings.tr_size  # this is like the timestep estimates-squared?
+    gradient_func = objective.gradient
+
+    dt = 1.0
+
+    g = gradient_func(x)
+    o = objective.value(x)
+    gNorm = np.linalg.norm(g)
+    print("\nInitial objective, residual = ", o, gNorm)
+
+    p = 0.0 * x # momentum
+
+    # this could potentially return an unstable solution
+    if is_converged(objective, x, 0.0, 0.0, g, g, 0, trSize, settings):
+        if callback: callback(x, objective)
+        return x, True
+    
+    cumulativeCgIters=0
+    maxCumulativeCgIters = 10 #25 # settings.max_cumulative_cg_iters
+
+    for i in range(settings.max_trust_iters):
+        # run dynamics
+        # (p^n+1 - p^n) / dt = -g(x^n) - p^n
+        # p = K * (x^n+1 - x^n) / dt
+        #dt = np.minimum(1.0, dt)
+        beta = 1.0
+
+        #print('p norm = ', np.linalg.norm(p))
+        pTrial = p - dt * (g + beta * p)
+        s = dt * objective.apply_precond(pTrial)
+        xPred = x + s
+        gPred = gradient_func(xPred)
+        gNormPred = np.linalg.norm(gPred)
+        realObj = objective.value(xPred)
+        #realObj = 0.0 #objective.value(xPred)
+
+        eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+        dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
+        #print('dt, estimate = ', dt, dtEstimate, o, realObj)
+
+        while not dt < dtEstimate:
+            dt = 0.5 * dt
+            pTrial = p - dt * (g + beta * p)
+            s = dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save of P gPred from last step, and some other things
+            xPred = x + s
+            gPred = gradient_func(xPred)
+            gNormPred = np.linalg.norm(gPred)
+            realObj = objective.value(xPred)
+            eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+            dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
+
+        if is_converged(objective, xPred, realObj, realObj,
+                        gPred, gPred, i, dt, settings):
+                if callback: callback(xPred, objective)
+                return xPred, True
+
+        x = xPred
+        o = realObj
+        g = gPred
+        p = pTrial
+        gNorm = gNormPred
+
+        print_min_banner(realObj, realObj,
+                         gNorm, gNorm,
+                         i, dt, np.linalg.norm(s),
+                         True, settings)
+        
+        cumulativeCgIters += 1
+        dt *= 2
+
+        if cumulativeCgIters >= maxCumulativeCgIters: 
+            objective.update_precond(x)
+            cumulativeCgIters=0
+            p = 0.0*p # shut off the momentum
+            dt = 1.0
+
+                    
+    print("Reached the maximum number of trust region iterations.")
+    if settings.check_stability:
+        objective.check_stability(x)
+
+        if callback: callback(x, objective)
+    return x, False
