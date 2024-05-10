@@ -624,39 +624,58 @@ def dynamic_minimize(objective, x, settings, callback=None):
         if callback: callback(x, objective)
         return x, True
     
-    cumulativeCgIters=0
-    maxCumulativeCgIters = 10 #25 # settings.max_cumulative_cg_iters
+    maxCumulativeCgIters = 25 # settings.max_cumulative_cg_iters
 
+    nonmonotone = True
+
+    alpha = 1.0
+    beta = 1.0
+    reduction = 0.5
+
+    if not nonmonotone:
+        alpha = 0.0
+        beta = 0.0
+
+    cumulativeCgIters=0
     for i in range(settings.max_trust_iters):
         # run dynamics
         # (p^n+1 - p^n) / dt = -g(x^n) - p^n
         # p = K * (x^n+1 - x^n) / dt
         #dt = np.minimum(1.0, dt)
-        beta = 1.0
 
         #print('p norm = ', np.linalg.norm(p))
-        pTrial = p - dt * (g + beta * p)
+        pTrial = alpha * p - dt * (g + beta * p)
         s = dt * objective.apply_precond(pTrial)
         xPred = x + s
         gPred = gradient_func(xPred)
         gNormPred = np.linalg.norm(gPred)
         realObj = objective.value(xPred)
-        #realObj = 0.0 #objective.value(xPred)
 
         eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
         dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
         #print('dt, estimate = ', dt, dtEstimate, o, realObj)
 
-        while not dt < dtEstimate:
-            dt = 0.5 * dt
-            pTrial = p - dt * (g + beta * p)
-            s = dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save of P gPred from last step, and some other things
-            xPred = x + s
-            gPred = gradient_func(xPred)
-            gNormPred = np.linalg.norm(gPred)
-            realObj = objective.value(xPred)
-            eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
-            dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
+        if nonmonotone:
+            while not dt < dtEstimate:
+                dt = reduction * dt
+                pTrial = alpha * p - dt * (g + beta * p)
+                s = dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save of P gPred from last step, and some other things
+                xPred = x + s
+                gPred = gradient_func(xPred)
+                gNormPred = np.linalg.norm(gPred)
+                realObj = objective.value(xPred)
+                eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+                dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
+        else:
+            while not realObj < o:  #- 1e-4 * dt * dt * pg:
+                dt = reduction * dt
+                s = dt * dt * objective.apply_precond(p) # this could potentially be optimized if we save off P gPred from last step, and some other things
+                xPred = x + s
+                gPred = gradient_func(xPred)
+                gNormPred = np.linalg.norm(gPred)
+                realObj = objective.value(xPred)
+                #eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+                #dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
 
         if is_converged(objective, xPred, realObj, realObj,
                         gPred, gPred, i, dt, settings):
@@ -664,10 +683,14 @@ def dynamic_minimize(objective, x, settings, callback=None):
                 return xPred, True
 
         x = xPred
+        if realObj > o:
+            print('energy up')
         o = realObj
         g = gPred
         p = pTrial
         gNorm = gNormPred
+
+        if callback: callback(x, objective.p)
 
         print_min_banner(realObj, realObj,
                          gNorm, gNorm,
@@ -675,7 +698,10 @@ def dynamic_minimize(objective, x, settings, callback=None):
                          True, settings)
         
         cumulativeCgIters += 1
-        dt *= 2
+        if nonmonotone:
+            dt /= reduction
+        else:
+            dt = 1.0
 
         if cumulativeCgIters >= maxCumulativeCgIters: 
             objective.update_precond(x)
