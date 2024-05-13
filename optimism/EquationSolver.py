@@ -618,6 +618,7 @@ def dynamic_minimize(objective, x, settings, callback=None):
     print("\nInitial objective, residual = ", o, gNorm)
 
     p = 0.0 * x # momentum
+    Qp = 0.0 * x # preconditioned momentum
 
     # this could potentially return an unstable solution
     if is_converged(objective, x, 0.0, 0.0, g, g, 0, trSize, settings):
@@ -629,61 +630,68 @@ def dynamic_minimize(objective, x, settings, callback=None):
 
     alpha = 1.0
     beta = 1.0
-    reduction = 0.75
-    #reduction = 0.8
+    reduction = 0.74
 
     if not nonmonotone:
         alpha = 0.0
         beta = 0.0
         maxCumulativeCgIters = 1 # settings.max_cumulative_cg_iters
 
+    Qg = objective.apply_precond(g)
+
     cumulativeCgIters=0
     for i in range(settings.max_trust_iters):
         # run dynamics
         # (p^n+1 - p^n) / dt = -alpha * g(x^n) - beta * p^n
         # p^n+1 = p^n + dt * (-g(x^n) -p^n)
-        # M * xdotdot + C * xdot + f(x) = 0.  C = M, M = K
 
-        # p = K * (x^n+1 - x^n) / dt
-        # dt = np.minimum(1.0, dt)
+        Qp = objective.apply_precond(p)
+        #Qg = objective.apply_precond(g)
 
-        #print('p norm = ', np.linalg.norm(p))
-        pTrial = alpha * p - dt * (g + beta * p)
-        s = dt * objective.apply_precond(pTrial)
+        pPred = (alpha - beta * dt) * p - dt * g
+        QpPred = (alpha - beta * dt) * Qp - dt * Qg
+        s = dt * QpPred 
         xPred = x + s
         gPred = gradient_func(xPred)
+        QgPred = objective.apply_precond(gPred)
         gNormPred = np.linalg.norm(gPred)
         realObj = objective.value(xPred)
 
         if nonmonotone:
-            eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s) # ~Hs, sHs / ss
+            eigEstimate = np.linalg.norm(QgPred-Qg) / np.linalg.norm(s)
             dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
-        #print('dt, estimate = ', dt, dtEstimate, o, realObj)
 
         if nonmonotone:
+            cutBack = 1
             while not dt < dtEstimate:
+                cutBack += 1
                 dt = reduction * dt
-                pTrial = alpha * p - dt * (g + beta * p)
-                s = dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save of P gPred from last step, and some other things
+                pPred = (alpha - beta * dt) * p - dt * g
+                QpPred = (alpha - beta * dt) * Qp - dt * Qg
+                s = dt * QpPred 
                 xPred = x + s
                 gPred = gradient_func(xPred)
-                eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+                QgPred = objective.apply_precond(gPred)
+                eigEstimate = np.linalg.norm(QgPred - Qg) / np.linalg.norm(s)
                 dtEstimate = 1.25 / np.sqrt(eigEstimate)
             realObj = objective.value(xPred)
         else:
             cutBack = 1
             gamma = 1e-4
-            while not (realObj < o + gamma * g@s) or not( realObj > o or gNormPred >= gNorm):
+            while not (realObj < o + gamma * g@s) and not (realObj <= 0 and gNormPred < gNorm):
+                cutBack += 1
                 dt = reduction * dt
-                s = s * (reduction * reduction) # dt * dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save off P gPred from last step, and some other things
+                s = s * (reduction * reduction)
                 xPred = x + s
                 realObj = objective.value(xPred)
                 gPred = gradient_func(xPred)
                 gNormPred = np.linalg.norm(gPred)
-                cutBack += 1
                 if (cutBack > 40):
                     print("lots of cutbacks")
                     break
+                
+            if cutBack > 1: QgPred = objective.apply_precond(gPred)
+
 
         if is_converged(objective, xPred, realObj, realObj,
                         gPred, gPred, i, dt, settings):
@@ -694,28 +702,31 @@ def dynamic_minimize(objective, x, settings, callback=None):
         if realObj >= o: print('energy up')
         o = realObj
         g = gPred
-        p = pTrial
+        p = pPred
+        Qp = QpPred
+        Qg = QgPred
         gNorm = gNormPred
 
         if callback: callback(x, objective.p)
 
         print_min_banner(realObj, realObj,
                          gNorm, gNorm,
-                         i, dt, False, #np.linalg.norm(s),
+                         i, dt, False,
                          True, settings)
         
         cumulativeCgIters += 1
         if nonmonotone:
             dt /= reduction
         else:
-            #dt /= reduction
-            #if (abs(dt-1.0) < 1e-7): dt = 1.0
             dt = np.maximum(1.0, dt / reduction)
+            if (abs(dt-1.0) < 1e-7): dt = 1.0
 
         if cumulativeCgIters >= maxCumulativeCgIters: 
             objective.update_precond(x)
             cumulativeCgIters=0
-            p = 0.0*p # shut off the momentum
+            p  = 0.0*p   # stop the momentum
+            Qp = 0.0*Qp
+            Qg = objective.apply_precond(g)
             if nonmonotone:
                 dt = 1.0
             else:
