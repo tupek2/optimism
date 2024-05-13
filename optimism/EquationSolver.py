@@ -624,29 +624,31 @@ def dynamic_minimize(objective, x, settings, callback=None):
         if callback: callback(x, objective)
         return x, True
     
-    nonmonotone = False
-    #maxCumulativeCgIters = 25 # settings.max_cumulative_cg_iters
-    maxCumulativeCgIters = 5 # settings.max_cumulative_cg_iters
+    nonmonotone = True
+    maxCumulativeCgIters = 8 #25 # settings.max_cumulative_cg_iters
 
     alpha = 1.0
     beta = 1.0
-    reduction = 0.7
+    reduction = 0.75
     #reduction = 0.8
 
     if not nonmonotone:
         alpha = 0.0
         beta = 0.0
+        maxCumulativeCgIters = 1 # settings.max_cumulative_cg_iters
 
     cumulativeCgIters=0
     for i in range(settings.max_trust_iters):
         # run dynamics
         # (p^n+1 - p^n) / dt = -alpha * g(x^n) - beta * p^n
+        # p^n+1 = p^n + dt * (-g(x^n) -p^n)
+        # M * xdotdot + C * xdot + f(x) = 0.  C = M, M = K
+
         # p = K * (x^n+1 - x^n) / dt
-        #dt = np.minimum(1.0, dt)
+        # dt = np.minimum(1.0, dt)
 
         #print('p norm = ', np.linalg.norm(p))
         pTrial = alpha * p - dt * (g + beta * p)
-        print('dt = ', dt)
         s = dt * objective.apply_precond(pTrial)
         xPred = x + s
         gPred = gradient_func(xPred)
@@ -654,7 +656,7 @@ def dynamic_minimize(objective, x, settings, callback=None):
         realObj = objective.value(xPred)
 
         if nonmonotone:
-            eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+            eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s) # ~Hs, sHs / ss
             dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
         #print('dt, estimate = ', dt, dtEstimate, o, realObj)
 
@@ -665,25 +667,23 @@ def dynamic_minimize(objective, x, settings, callback=None):
                 s = dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save of P gPred from last step, and some other things
                 xPred = x + s
                 gPred = gradient_func(xPred)
-                gNormPred = np.linalg.norm(gPred)
-                realObj = objective.value(xPred)
                 eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
                 dtEstimate = 1.25 / np.sqrt(eigEstimate)
+            realObj = objective.value(xPred)
         else:
             cutBack = 1
-            while not (realObj < o + 1e-3 * s@g):
+            gamma = 1e-4
+            while not (realObj < o + gamma * g@s) or not( realObj > o or gNormPred >= gNorm):
                 dt = reduction * dt
                 s = s * (reduction * reduction) # dt * dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save off P gPred from last step, and some other things
                 xPred = x + s
+                realObj = objective.value(xPred)
                 gPred = gradient_func(xPred)
                 gNormPred = np.linalg.norm(gPred)
-                realObj = objective.value(xPred)
                 cutBack += 1
                 if (cutBack > 40):
                     print("lots of cutbacks")
                     break
-                #eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
-                #dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
 
         if is_converged(objective, xPred, realObj, realObj,
                         gPred, gPred, i, dt, settings):
@@ -710,13 +710,16 @@ def dynamic_minimize(objective, x, settings, callback=None):
         else:
             #dt /= reduction
             #if (abs(dt-1.0) < 1e-7): dt = 1.0
-            dt = 1.0
+            dt = np.maximum(1.0, dt / reduction)
 
         if cumulativeCgIters >= maxCumulativeCgIters: 
             objective.update_precond(x)
             cumulativeCgIters=0
             p = 0.0*p # shut off the momentum
-            dt = 1.0
+            if nonmonotone:
+                dt = 1.0
+            else:
+                dt = np.maximum(1.0, dt / reduction)
 
                     
     print("Reached the maximum number of trust region iterations.")
