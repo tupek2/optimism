@@ -51,6 +51,26 @@ class PrecondStrategy:
             return self.K + sparse_diags( shift * dAbs, 0, format='csc' )
 
 
+class PrecondStrategyShiftByScaledIdentity:
+
+    def __init__(self, objective_precond):
+        self.objective_precond = objective_precond
+        
+        
+    def initialize(self, x, p):
+        self.K = self.objective_precond(x, p)
+    
+    
+    def precond_at_attempt(self, attempt):
+        if attempt==0:
+            return self.K
+        else:
+            dAbs = onp.abs(self.K.diagonal())
+            averageD = onp.average(dAbs)
+            shift = averageD * pow(10, (-6+attempt))
+            return self.K + sparse_diags( shift * onp.ones_like(dAbs), 0, format='csc' )
+
+
 class TwoTryPrecondStrategy(PrecondStrategy):
 
     def __init__(self, f1, f2):

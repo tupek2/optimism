@@ -624,13 +624,14 @@ def dynamic_minimize(objective, x, settings, callback=None):
         if callback: callback(x, objective)
         return x, True
     
-    maxCumulativeCgIters = 25 # settings.max_cumulative_cg_iters
-
-    nonmonotone = True
+    nonmonotone = False
+    #maxCumulativeCgIters = 25 # settings.max_cumulative_cg_iters
+    maxCumulativeCgIters = 5 # settings.max_cumulative_cg_iters
 
     alpha = 1.0
     beta = 1.0
-    reduction = 0.5
+    reduction = 0.7
+    #reduction = 0.8
 
     if not nonmonotone:
         alpha = 0.0
@@ -639,20 +640,22 @@ def dynamic_minimize(objective, x, settings, callback=None):
     cumulativeCgIters=0
     for i in range(settings.max_trust_iters):
         # run dynamics
-        # (p^n+1 - p^n) / dt = -g(x^n) - p^n
+        # (p^n+1 - p^n) / dt = -alpha * g(x^n) - beta * p^n
         # p = K * (x^n+1 - x^n) / dt
         #dt = np.minimum(1.0, dt)
 
         #print('p norm = ', np.linalg.norm(p))
         pTrial = alpha * p - dt * (g + beta * p)
+        print('dt = ', dt)
         s = dt * objective.apply_precond(pTrial)
         xPred = x + s
         gPred = gradient_func(xPred)
         gNormPred = np.linalg.norm(gPred)
         realObj = objective.value(xPred)
 
-        eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
-        dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
+        if nonmonotone:
+            eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
+            dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
         #print('dt, estimate = ', dt, dtEstimate, o, realObj)
 
         if nonmonotone:
@@ -665,15 +668,20 @@ def dynamic_minimize(objective, x, settings, callback=None):
                 gNormPred = np.linalg.norm(gPred)
                 realObj = objective.value(xPred)
                 eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
-                dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
+                dtEstimate = 1.25 / np.sqrt(eigEstimate)
         else:
-            while not realObj < o:  #- 1e-4 * dt * dt * pg:
+            cutBack = 1
+            while not (realObj < o + 1e-3 * s@g):
                 dt = reduction * dt
-                s = dt * dt * objective.apply_precond(p) # this could potentially be optimized if we save off P gPred from last step, and some other things
+                s = s * (reduction * reduction) # dt * dt * objective.apply_precond(pTrial) # this could potentially be optimized if we save off P gPred from last step, and some other things
                 xPred = x + s
                 gPred = gradient_func(xPred)
                 gNormPred = np.linalg.norm(gPred)
                 realObj = objective.value(xPred)
+                cutBack += 1
+                if (cutBack > 40):
+                    print("lots of cutbacks")
+                    break
                 #eigEstimate = np.linalg.norm(objective.apply_precond(gPred - g)) / np.linalg.norm(s)
                 #dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be twice this?
 
@@ -683,8 +691,7 @@ def dynamic_minimize(objective, x, settings, callback=None):
                 return xPred, True
 
         x = xPred
-        if realObj > o:
-            print('energy up')
+        if realObj >= o: print('energy up')
         o = realObj
         g = gPred
         p = pTrial
@@ -694,13 +701,15 @@ def dynamic_minimize(objective, x, settings, callback=None):
 
         print_min_banner(realObj, realObj,
                          gNorm, gNorm,
-                         i, dt, np.linalg.norm(s),
+                         i, dt, False, #np.linalg.norm(s),
                          True, settings)
         
         cumulativeCgIters += 1
         if nonmonotone:
             dt /= reduction
         else:
+            #dt /= reduction
+            #if (abs(dt-1.0) < 1e-7): dt = 1.0
             dt = 1.0
 
         if cumulativeCgIters >= maxCumulativeCgIters: 
@@ -713,6 +722,6 @@ def dynamic_minimize(objective, x, settings, callback=None):
     print("Reached the maximum number of trust region iterations.")
     if settings.check_stability:
         objective.check_stability(x)
-
         if callback: callback(x, objective)
+
     return x, False
