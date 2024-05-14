@@ -405,7 +405,6 @@ def trust_region_minimize(objective, x, settings, callback=None):
                                                 hess_vec_func,
                                                 objective.apply_precond,
                                                 trSize, settings)
-
             
         cumulativeCgIters += cgIters
         
@@ -606,6 +605,10 @@ def nonlinear_equation_solve(objective, x0, p, settings,
     return objective.invScaling * xBar, solverSuccess
     
 
+
+    
+
+
 def dynamic_minimize(objective, x, settings, callback=None):
     trSize = settings.tr_size  # this is like the timestep estimates-squared?
     gradient_func = objective.gradient
@@ -618,80 +621,55 @@ def dynamic_minimize(objective, x, settings, callback=None):
     print("\nInitial objective, residual = ", o, gNorm)
 
     p = 0.0 * x # momentum
-    Qp = 0.0 * x # preconditioned momentum
+    v = 0.0 * x # preconditioned momentum
+
+    precondScale = 1.0
 
     # this could potentially return an unstable solution
     if is_converged(objective, x, 0.0, 0.0, g, g, 0, trSize, settings):
         if callback: callback(x, objective)
         return x, True
     
-    nonmonotone = True
-    maxCumulativeCgIters = 8 #25 # settings.max_cumulative_cg_iters
+    maxCumulativeCgIters = 15  #25 # settings.max_cumulative_cg_iters
 
     alpha = 1.0
     beta = 1.0
-    reduction = 0.74
+    reduction = 0.85
 
-    if not nonmonotone:
-        alpha = 0.0
-        beta = 0.0
-        maxCumulativeCgIters = 1 # settings.max_cumulative_cg_iters
-
-    Qg = objective.apply_precond(g)
+    Qg = precondScale * objective.apply_precond(g)
 
     cumulativeCgIters=0
     for i in range(settings.max_trust_iters):
         # run dynamics
         # (p^n+1 - p^n) / dt = -alpha * g(x^n) - beta * p^n
-        # p^n+1 = p^n + dt * (-g(x^n) -p^n)
-
-        Qp = objective.apply_precond(p)
-        #Qg = objective.apply_precond(g)
 
         pPred = (alpha - beta * dt) * p - dt * g
-        QpPred = (alpha - beta * dt) * Qp - dt * Qg
-        s = dt * QpPred 
-        xPred = x + s
+        vPred = (alpha - beta * dt) * v - dt * Qg
+        s = dt * vPred
+        xPred = x + s 
         gPred = gradient_func(xPred)
-        QgPred = objective.apply_precond(gPred)
+        QgPred = precondScale * objective.apply_precond(gPred)
         gNormPred = np.linalg.norm(gPred)
         realObj = objective.value(xPred)
 
-        if nonmonotone:
-            eigEstimate = np.linalg.norm(QgPred-Qg) / np.linalg.norm(s)
-            dtEstimate = 1.25 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
+        eigEstimate = np.linalg.norm(QgPred - Qg) / np.linalg.norm(s)
+        #eigEstimate = ((QgPred - Qg) @ s) / (s @ s)
+        dtEstimate = 1.2 / np.sqrt(eigEstimate) # really dt can be 2 / sqrt(maxEig)?
 
-        if nonmonotone:
-            cutBack = 1
-            while not dt < dtEstimate:
-                cutBack += 1
-                dt = reduction * dt
-                pPred = (alpha - beta * dt) * p - dt * g
-                QpPred = (alpha - beta * dt) * Qp - dt * Qg
-                s = dt * QpPred 
-                xPred = x + s
-                gPred = gradient_func(xPred)
-                QgPred = objective.apply_precond(gPred)
-                eigEstimate = np.linalg.norm(QgPred - Qg) / np.linalg.norm(s)
-                dtEstimate = 1.25 / np.sqrt(eigEstimate)
-            realObj = objective.value(xPred)
-        else:
-            cutBack = 1
-            gamma = 1e-4
-            while not (realObj < o + gamma * g@s) and not (realObj <= 0 and gNormPred < gNorm):
-                cutBack += 1
-                dt = reduction * dt
-                s = s * (reduction * reduction)
-                xPred = x + s
-                realObj = objective.value(xPred)
-                gPred = gradient_func(xPred)
-                gNormPred = np.linalg.norm(gPred)
-                if (cutBack > 40):
-                    print("lots of cutbacks")
-                    break
-                
-            if cutBack > 1: QgPred = objective.apply_precond(gPred)
-
+        cutBack = 1
+        while not dt < dtEstimate:
+            cutBack += 1
+            dt = reduction * dt
+            pPred = (alpha - beta * dt) * p - dt * g
+            vPred = (alpha - beta * dt) * v - dt * Qg
+            s = dt * vPred
+            xPred = x + s
+            gPred = gradient_func(xPred)
+            QgPred = precondScale * objective.apply_precond(gPred)
+            eigEstimate = np.linalg.norm(QgPred - Qg) / np.linalg.norm(s)
+            #eigEstimate = ((QgPred - Qg) @ s) / (s @ s)
+            dtEstimate = 1.2 / np.sqrt(eigEstimate)
+        realObj = objective.value(xPred)
 
         if is_converged(objective, xPred, realObj, realObj,
                         gPred, gPred, i, dt, settings):
@@ -703,7 +681,8 @@ def dynamic_minimize(objective, x, settings, callback=None):
         o = realObj
         g = gPred
         p = pPred
-        Qp = QpPred
+        v = vPred
+        #v = objective.apply_precond(p)
         Qg = QgPred
         gNorm = gNormPred
 
@@ -715,24 +694,120 @@ def dynamic_minimize(objective, x, settings, callback=None):
                          True, settings)
         
         cumulativeCgIters += 1
-        if nonmonotone:
-            dt /= reduction
-        else:
-            dt = np.maximum(1.0, dt / reduction)
-            if (abs(dt-1.0) < 1e-7): dt = 1.0
+        dt /= reduction
+        dt = np.minimum(dt, reduction)
+
+        if cumulativeCgIters >= maxCumulativeCgIters: 
+            objective.update_precond(x) #kind of want a way to know if precond was shifted
+            cumulativeCgIters=0
+            p = 0.0*p   # stop the momentum
+            v = 0.0*v
+
+            Qg = objective.apply_precond(g)
+            #rPr = g@Qg
+            #curvature = Qg@objective.hessian_vec(x, Qg)
+            #alpha = rPr / curvature
+
+            #if abs(alpha-1) > 1e-6:
+            #    precondScale = np.maximum(1.0 / alpha, reduction)
+            #else:
+            precondScale = 1.0 # delete this failed experiment eventually
+            dt = 1.0
+
+    print("Reached the maximum number of trust region iterations.")
+    if settings.check_stability:
+        objective.check_stability(x)
+        if callback: callback(x, objective)
+
+    return x, False
+
+
+def newton_linesearch(objective, x, settings, callback=None):
+    trSize = settings.tr_size  # this is like the timestep estimates-squared?
+    gradient_func = objective.gradient
+
+    g = gradient_func(x)
+    o = objective.value(x)
+    gNorm = np.linalg.norm(g)
+    print("\nInitial objective, residual = ", o, gNorm)
+
+    # this could potentially return an unstable solution
+    if is_converged(objective, x, 0.0, 0.0, g, g, 0, trSize, settings):
+        if callback: callback(x, objective)
+        return x, True
+    
+    alpha = 1.0
+    reduction = 0.65
+
+    maxCumulativeCgIters = 1
+
+    cumulativeCgIters=0
+    for i in range(settings.max_trust_iters):
+        s = -alpha * objective.apply_precond(g)
+        xPred = x + s
+        gPred = gradient_func(xPred)
+        gNormPred = np.linalg.norm(gPred)
+        objPred = objective.value(xPred)
+
+        gamma = 1e-4
+        def is_improved(objPred, s, gNormPred):
+            return (objPred < o + gamma * g@s) or (objPred <= o and gNormPred < gNorm)
+        
+        cutBack = 1
+        while not is_improved(objPred, s, gNormPred):
+            cutBack += 1
+            alpha = reduction * alpha
+            s = reduction * s
+            xPred = x + s
+            objPred = objective.value(xPred)
+            gPred = gradient_func(xPred)
+            gNormPred = np.linalg.norm(gPred)
+
+            if (cutBack > 40):
+                print("lots of cutbacks")
+                break
+
+        if is_converged(objective, xPred, objPred, objPred,
+                        gPred, gPred, i, alpha, settings):
+            if callback: callback(xPred, objective)
+            return xPred, True
+
+        x = xPred
+        if objPred >= o: print('energy up')
+        o = objPred
+        g = gPred
+        gNorm = gNormPred
+
+        if callback: callback(x, objective.p)
+
+        print_min_banner(objPred, objPred,
+                         gNorm, gNorm,
+                         i, alpha, False,
+                         True, settings)
+        
+        cumulativeCgIters += 1
+        maxAlpha = 1.0 / np.pow(reduction, 5)
+
+        alpha = np.maximum(1.0, alpha / reduction)
+        alpha = np.maximum(maxAlpha, alpha)
+        if (abs(alpha-1.0) < 1e-7): alpha = 1.0
 
         if cumulativeCgIters >= maxCumulativeCgIters: 
             objective.update_precond(x)
             cumulativeCgIters=0
-            p  = 0.0*p   # stop the momentum
-            Qp = 0.0*Qp
             Qg = objective.apply_precond(g)
-            if nonmonotone:
-                dt = 1.0
-            else:
-                dt = np.maximum(1.0, dt / reduction)
+            rPr = g@Qg
+            curvature = Qg@objective.hessian_vec(x, Qg)
+            alpha = rPr / curvature
+            if abs(alpha-1.0) < 1e-5:
+                alpha = 1.0
 
-                    
+            alpha = np.minimum(maxAlpha, alpha)
+            if alpha < 0:
+                print('found negative curvature.')
+                alpha = maxAlpha
+
+
     print("Reached the maximum number of trust region iterations.")
     if settings.check_stability:
         objective.check_stability(x)

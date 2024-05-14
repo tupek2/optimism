@@ -67,8 +67,9 @@ class PrecondStrategyShiftByScaledIdentity:
         else:
             dAbs = onp.abs(self.K.diagonal())
             averageD = onp.average(dAbs)
-            shift = averageD * pow(10, (-6+attempt))
-            return self.K + sparse_diags( shift * onp.ones_like(dAbs), 0, format='csc' )
+            scale = pow(10, (-7+2*attempt))
+            shift = averageD * scale
+            return (1.0-scale) * self.K + sparse_diags( shift * onp.ones_like(dAbs), 0, format='csc' )
 
 
 class TwoTryPrecondStrategy(PrecondStrategy):
